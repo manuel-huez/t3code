@@ -42,7 +42,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
   const snapshot = query.data;
   const scanning = snapshot?.breakdown.status === "scanning";
   const rows = snapshot ? diskUsageRows(snapshot) : [];
-  const largestBytes = rows[0]?.bytes ?? 0;
+  const largestBytes = rows.find((row) => row.showBar)?.bytes ?? 0;
   const fraction = snapshot?.volume ? diskUsedFraction(snapshot.volume) : null;
   const tone = fraction === null ? "default" : diskUsageTone(fraction);
 
@@ -74,18 +74,24 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
     >
       <div className="overflow-hidden rounded-[inherit]">
         <div className="px-4 py-4 sm:px-5">
-          <div className="flex items-baseline justify-between gap-3">
+          <div className="text-3xs font-semibold uppercase tracking-widest text-muted-foreground/70">
+            Data volume
+          </div>
+          <div className="mt-2.5 flex items-baseline justify-between gap-3">
             <div
               className={cn(
-                "font-mono text-2xl font-semibold tracking-tighter tabular-nums",
+                "font-mono text-2xl font-semibold tracking-tighter tabular-nums text-foreground",
                 tone === "warning" && "text-warning-foreground",
                 tone === "danger" && "text-destructive",
               )}
             >
-              {fraction === null ? "…" : `${Math.round(fraction * 100)}% used`}
+              {fraction === null ? "..." : `${Math.round(fraction * 100)}%`}
+              <span className="ml-1.5 font-sans text-xs font-normal tracking-normal text-muted-foreground">
+                used
+              </span>
             </div>
             {snapshot?.volume ? (
-              <div className="truncate text-xs text-muted-foreground">
+              <div className="truncate text-3xs text-muted-foreground/60">
                 {formatBytes(snapshot.volume.availableBytes)} free of{" "}
                 {formatBytes(snapshot.volume.totalBytes)}
               </div>
@@ -140,15 +146,19 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
                     {formatBytes(row.bytes)}
                   </span>
                 </div>
-                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className={cn(
-                      "h-full rounded-full",
-                      row.muted ? "bg-muted-foreground/35" : "bg-info/80",
-                    )}
-                    style={{ width: `${largestBytes > 0 ? (row.bytes / largestBytes) * 100 : 0}%` }}
-                  />
-                </div>
+                {row.showBar ? (
+                  <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={cn(
+                        "h-full rounded-full",
+                        row.muted ? "bg-muted-foreground/35" : "bg-info/80",
+                      )}
+                      style={{
+                        width: `${largestBytes > 0 ? (row.bytes / largestBytes) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                ) : null}
               </li>
             ))}
           </ul>
