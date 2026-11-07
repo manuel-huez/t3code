@@ -46,11 +46,7 @@ export const DiskUsageSnapshot = Schema.Struct({
   sampledAt: NonNegativeInt,
   /** The volume holding the T3 home directory. */
   volume: Schema.NullOr(
-    Schema.Struct({
-      path: Schema.String,
-      totalBytes: NonNegativeInt,
-      availableBytes: NonNegativeInt,
-    }),
+    Schema.Struct({ totalBytes: NonNegativeInt, availableBytes: NonNegativeInt }),
   ),
   /** Allocated size of T3's own data. It is a background scan, so it may lag the volume. */
   breakdown: Schema.Struct({
