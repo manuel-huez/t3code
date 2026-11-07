@@ -831,8 +831,8 @@ fn spawn_input_reader() -> (SyncSender<Input>, Receiver<Input>) {
     let reader_sender = sender.clone();
     thread::spawn(move || {
         let sender = reader_sender;
-        // Whatever ends this loop, a running disk scan has no one left to answer.
-        let _shutdown = ShutdownOnDrop(sender.clone());
+        // Whatever ends this loop, main must exit; the scan threads' senders keep the channel open.
+        let _closed = StdinClosedOnDrop(sender.clone());
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
             let line = match line {
@@ -867,11 +867,10 @@ fn spawn_input_reader() -> (SyncSender<Input>, Receiver<Input>) {
     (sender, receiver)
 }
 
-struct ShutdownOnDrop(SyncSender<Input>);
+struct StdinClosedOnDrop(SyncSender<Input>);
 
-impl Drop for ShutdownOnDrop {
+impl Drop for StdinClosedOnDrop {
     fn drop(&mut self) {
-        disk::SHUTDOWN.store(true, Ordering::Relaxed);
         let _ = self.0.send(Input::StdinClosed);
     }
 }

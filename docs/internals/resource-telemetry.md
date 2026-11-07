@@ -64,18 +64,10 @@ Free space and the per-location breakdown both come from the native monitor
 mount points would report macOS's sealed system volume, because firmlinks hide the data
 volume from the path. If the monitor is missing, the card still renders and says so.
 
-The scan runs on its own thread, so process sampling never waits for it, and the thread
-stops when the server closes the monitor's stdin. The monitor's input channel is shared with
-that thread, so end of input is an explicit message: the channel alone never reports it.
-The server starts a scan only when diagnostics asks, at most once every ten minutes, and
-`read` returns the previous result while one is running.
+The scan runs on its own thread, so process sampling never waits for it. That thread holds
+a sender to the monitor's input channel, so end of input is an explicit message: the
+channel alone never reports it. The server starts a scan only when diagnostics asks, at
+most once every ten minutes, and `read` returns the previous result while one is running.
 
-- Sizes are allocated blocks, hardlinks count once, symlinks are not followed, and the walk
-  stays on one device. APFS clones are reported per file, so macOS can overcount.
-- Directories are keyed to a fixed depth and files one level shallower, so a folder of
-  thousands of attachments adds one entry, not thousands.
-- Rescan requests carry the server timestamp of the snapshot the user saw, not a boolean
-  or a client clock. A boolean would rescan on every poll, and a skewed client clock would
-  rescan forever.
-- `scanDisk` and `diskSpace` are additive, so the protocol version stays 3. A monitor built
-  before them answers with `invalid-command`, and the request times out.
+`scanDisk` and `diskSpace` are additive, so the protocol version stays 3. A monitor built
+before them answers with `invalid-command`, and the request times out.
