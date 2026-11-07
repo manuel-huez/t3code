@@ -8,6 +8,8 @@ export interface DiskUsageRow {
   readonly detail: string | null;
   readonly bytes: number;
   readonly muted: boolean;
+  /** The rest of the disk dwarfs T3's own data, so it is a figure, not a comparable bar. */
+  readonly showBar: boolean;
 }
 
 const WARNING_FRACTION = 0.85;
@@ -32,7 +34,7 @@ export function diskUsageTone(fraction: number): DiskUsageTone {
   return "default";
 }
 
-/** Largest first. Worth showing only once a scan has finished, or "everything else" would be all of it. */
+/** T3's data largest first, then the rest of the disk. Empty until a scan has finished. */
 export function diskUsageRows(snapshot: DiskUsageSnapshot): ReadonlyArray<DiskUsageRow> {
   const { breakdown, volume } = snapshot;
   if (breakdown.scannedAt === null) return [];
@@ -40,9 +42,10 @@ export function diskUsageRows(snapshot: DiskUsageSnapshot): ReadonlyArray<DiskUs
   const rows: Array<DiskUsageRow> = breakdown.entries.map((entry) => ({
     key: `${entry.kind}:${entry.path}`,
     label: entry.kind === "worktree" ? entry.path.replace(/^[^/]+\//, "") : KIND_LABELS[entry.kind],
-    detail: entry.kind === "worktree" ? "Worktree" : entry.path,
+    detail: entry.kind === "worktree" ? "Worktree" : entry.kind === "other" ? null : entry.path,
     bytes: entry.bytes,
     muted: false,
+    showBar: true,
   }));
   if (breakdown.omittedEntries > 0) {
     rows.push({
@@ -51,6 +54,7 @@ export function diskUsageRows(snapshot: DiskUsageSnapshot): ReadonlyArray<DiskUs
       detail: null,
       bytes: breakdown.omittedBytes,
       muted: true,
+      showBar: true,
     });
   }
   if (volume !== null) {
@@ -64,8 +68,9 @@ export function diskUsageRows(snapshot: DiskUsageSnapshot): ReadonlyArray<DiskUs
         detail: "Not stored by T3",
         bytes: elsewhere,
         muted: true,
+        showBar: false,
       });
     }
   }
-  return rows.toSorted((a, b) => b.bytes - a.bytes);
+  return rows.toSorted((a, b) => Number(!a.showBar) - Number(!b.showBar) || b.bytes - a.bytes);
 }
