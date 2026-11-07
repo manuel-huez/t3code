@@ -15,6 +15,58 @@ export const HostResourcesSnapshot = Schema.Struct({
 });
 export type HostResourcesSnapshot = typeof HostResourcesSnapshot.Type;
 
+export const DiskUsageInput = Schema.Struct({
+  /**
+   * Rescan unless a scan already started at or after this server timestamp. Clients pass the
+   * `sampledAt` of the snapshot they are looking at, so repeated polls cannot trigger a loop.
+   */
+  rescanAfter: Schema.optional(NonNegativeInt),
+});
+export type DiskUsageInput = typeof DiskUsageInput.Type;
+
+export const DiskUsageEntryKind = Schema.Literals([
+  "attachments",
+  "database",
+  "logs",
+  "caches",
+  "worktree",
+  "other",
+]);
+export type DiskUsageEntryKind = typeof DiskUsageEntryKind.Type;
+
+export const DiskUsageEntry = Schema.Struct({
+  kind: DiskUsageEntryKind,
+  /** Path relative to the T3 home directory. */
+  path: Schema.String,
+  bytes: NonNegativeInt,
+});
+export type DiskUsageEntry = typeof DiskUsageEntry.Type;
+
+export const DiskUsageSnapshot = Schema.Struct({
+  sampledAt: NonNegativeInt,
+  /** The volume holding the T3 home directory. */
+  volume: Schema.NullOr(
+    Schema.Struct({
+      path: Schema.String,
+      totalBytes: NonNegativeInt,
+      availableBytes: NonNegativeInt,
+    }),
+  ),
+  /** Allocated size of T3's own data. It is a background scan, so it may lag the volume. */
+  breakdown: Schema.Struct({
+    status: Schema.Literals(["scanning", "ready", "failed"]),
+    /** When the entries below were measured; null before the first scan completes. */
+    scannedAt: Schema.NullOr(NonNegativeInt),
+    totalBytes: NonNegativeInt,
+    /** Largest first. */
+    entries: Schema.Array(DiskUsageEntry),
+    /** Entries beyond the cap, folded into one total. */
+    omittedEntries: NonNegativeInt,
+    omittedBytes: NonNegativeInt,
+  }),
+});
+export type DiskUsageSnapshot = typeof DiskUsageSnapshot.Type;
+
 export const ResourceTelemetryIoSemantics = Schema.Literals([
   "storage",
   "logical",
