@@ -305,7 +305,7 @@ const layerUsage = UsageService.layer.pipe(
 
 const layerResourceDiagnostics = Layer.mergeAll(
   HostResources.layer,
-  DiskUsage.layer,
+  DiskUsage.layer.pipe(Layer.provide(layerResourceTelemetry)),
   layerResourceTelemetry,
   ProcessDiagnostics.layer.pipe(Layer.provide(layerResourceTelemetry)),
   ProcessResourceMonitor.layer.pipe(Layer.provide(layerResourceTelemetry)),
