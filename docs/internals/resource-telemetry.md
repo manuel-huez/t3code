@@ -58,16 +58,20 @@ still works.
 
 ## Disk usage
 
-Free space and the per-location breakdown both come from the native monitor
-([`disk.rs`](../../native/resource-monitor/src/disk.rs)), requested through
-`diskSpace` and `scanDisk`. Space comes from `statvfs` on the T3 home path itself: matching
-mount points would report macOS's sealed system volume, because firmlinks hide the data
-volume from the path. If the monitor is missing, the card still renders and says so.
+Free space is a cheap `fs.statfs` read in the server, like host memory. It reads the T3 home
+path itself: matching mount points would report macOS's sealed system volume, because
+firmlinks hide the data volume from the path. The per-location breakdown walks the whole
+tree, so it runs in the native monitor
+([`disk.rs`](../../native/resource-monitor/src/disk.rs)) through `scanDisk`, outside the
+server's shared libuv thread pool. Without the monitor, the card shows free space and says
+the breakdown is unavailable.
 
 The scan runs on its own thread, so process sampling never waits for it. That thread holds
 a sender to the monitor's input channel, so end of input is an explicit message: the
 channel alone never reports it. The server starts a scan only when diagnostics asks, at
 most once every ten minutes, and `read` returns the previous result while one is running.
+The client polls only while a scan runs, so an open card does not resend an unchanged
+breakdown.
 
-`scanDisk` and `diskSpace` are additive, so the protocol version stays 3. A monitor built
-before them answers with `invalid-command`, and the request times out.
+`scanDisk` is additive, so the protocol version stays 3. A monitor built before it answers
+with `invalid-command`, and the request times out.

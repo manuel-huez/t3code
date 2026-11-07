@@ -1319,7 +1319,9 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:disk-usage",
       tag: WS_METHODS.serverGetDiskUsage,
       staleTimeMs: 5_000,
-      refreshIntervalMs: 5_000,
+      refreshIntervalMs: 2_000,
+      // Poll only until the scan settles; opening the card or rescanning fetches again.
+      isFinal: (snapshot) => snapshot.breakdown.status !== "scanning",
       idleTtlMs: 0,
     }),
     processResourceHistory: createEnvironmentRpcQueryAtomFamily(runtime, {

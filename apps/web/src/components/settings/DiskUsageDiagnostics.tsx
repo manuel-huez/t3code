@@ -120,7 +120,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
               />
             </div>
           ) : null}
-          {snapshot && snapshot.volume === null && snapshot.breakdown.status !== "unavailable" ? (
+          {snapshot && snapshot.volume === null ? (
             <p className="mt-2 text-xs text-muted-foreground">
               This server cannot report the free space of its data volume.
             </p>

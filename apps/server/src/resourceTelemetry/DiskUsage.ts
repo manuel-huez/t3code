@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Effect's FileSystem has no statfs.
+import * as NodeFSP from "node:fs/promises";
 import type { DiskUsageEntry, DiskUsageInput, DiskUsageSnapshot } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -119,7 +121,16 @@ const make = Effect.fn("makeDiskUsage")(function* () {
     last: null,
   });
 
-  const readVolume = monitor.diskSpace(config.baseDir).pipe(Effect.orElseSucceed(() => null));
+  // A volume the server cannot read shows as unavailable, not as an RPC failure.
+  const readVolume = Effect.promise(() =>
+    NodeFSP.statfs(config.baseDir).then(
+      (stats) => ({
+        totalBytes: stats.blocks * stats.bsize,
+        availableBytes: stats.bavail * stats.bsize,
+      }),
+      () => null,
+    ),
+  );
   const relative = (directory: string) =>
     path.relative(config.baseDir, directory).replaceAll("\\", "/");
 
