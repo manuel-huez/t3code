@@ -1,52 +1,14 @@
-//! Disk space and per-directory allocated size for the T3 home directory.
+//! Per-directory allocated size for the T3 home directory.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use walkdir::WalkDir;
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct VolumeSpace {
-    pub total_bytes: u64,
-    pub available_bytes: u64,
-}
-
 pub struct ScanResult {
     pub total_bytes: u64,
     /// Allocated bytes per path relative to the root, with `/` separators.
     pub entries: Vec<(String, u64)>,
-}
-
-/// Asks the kernel about `path` itself. Mount-point matching would report macOS's sealed system
-/// volume instead of the data volume, because firmlinks hide the real mount from the path.
-#[cfg(unix)]
-pub fn volume_space(path: &Path) -> Option<VolumeSpace> {
-    let stats = rustix::fs::statvfs(path).ok()?;
-    let block_size = if stats.f_frsize > 0 {
-        stats.f_frsize
-    } else {
-        stats.f_bsize
-    };
-    Some(VolumeSpace {
-        total_bytes: stats.f_blocks.saturating_mul(block_size),
-        available_bytes: stats.f_bavail.saturating_mul(block_size),
-    })
-}
-
-#[cfg(not(unix))]
-pub fn volume_space(path: &Path) -> Option<VolumeSpace> {
-    // `canonicalize` adds a `\\?\` prefix that never matches a mount point such as `C:\`.
-    let absolute = std::path::absolute(path).ok()?;
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let disk = disks
-        .list()
-        .iter()
-        .filter(|disk| absolute.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())?;
-    Some(VolumeSpace {
-        total_bytes: disk.total_space(),
-        available_bytes: disk.available_space(),
-    })
 }
 
 #[cfg(unix)]
@@ -209,12 +171,5 @@ mod tests {
     fn fails_for_a_missing_root() {
         let temp = tempfile::tempdir().unwrap();
         assert!(scan(&temp.path().join("missing"), 3).is_err());
-    }
-
-    #[test]
-    fn reports_space_for_an_existing_path() {
-        let temp = tempfile::tempdir().unwrap();
-        let space = volume_space(temp.path()).unwrap();
-        assert!(space.total_bytes > 0 && space.available_bytes <= space.total_bytes);
     }
 }

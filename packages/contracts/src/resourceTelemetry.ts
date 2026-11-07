@@ -189,14 +189,6 @@ export const ResourceMonitorReadHistoryCommand = Schema.Struct({
 });
 export type ResourceMonitorReadHistoryCommand = typeof ResourceMonitorReadHistoryCommand.Type;
 
-export const ResourceMonitorDiskSpaceCommand = Schema.Struct({
-  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
-  type: Schema.Literal("diskSpace"),
-  requestId: TrimmedNonEmptyString,
-  path: Schema.String,
-});
-export type ResourceMonitorDiskSpaceCommand = typeof ResourceMonitorDiskSpaceCommand.Type;
-
 export const ResourceMonitorScanDiskCommand = Schema.Struct({
   version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
   type: Schema.Literal("scanDisk"),
@@ -220,7 +212,6 @@ export const ResourceMonitorCommand = Schema.Union([
   ResourceMonitorSampleNowCommand,
   ResourceMonitorProcessTableCommand,
   ResourceMonitorReadHistoryCommand,
-  ResourceMonitorDiskSpaceCommand,
   ResourceMonitorScanDiskCommand,
   ResourceMonitorShutdownCommand,
 ]);
@@ -276,16 +267,6 @@ export const ResourceMonitorHistoryChunkEvent = Schema.Struct({
 });
 export type ResourceMonitorHistoryChunkEvent = typeof ResourceMonitorHistoryChunkEvent.Type;
 
-export const ResourceMonitorDiskSpaceEvent = Schema.Struct({
-  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
-  type: Schema.Literal("diskSpace"),
-  requestId: TrimmedNonEmptyString,
-  volume: Schema.NullOr(
-    Schema.Struct({ totalBytes: NonNegativeInt, availableBytes: NonNegativeInt }),
-  ),
-});
-export type ResourceMonitorDiskSpaceEvent = typeof ResourceMonitorDiskSpaceEvent.Type;
-
 export const ResourceMonitorDiskScanEvent = Schema.Struct({
   version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
   type: Schema.Literal("diskScan"),
@@ -311,7 +292,6 @@ export const ResourceMonitorEvent = Schema.Union([
   ResourceMonitorSnapshotEvent,
   ResourceMonitorProcessTableEvent,
   ResourceMonitorHistoryChunkEvent,
-  ResourceMonitorDiskSpaceEvent,
   ResourceMonitorDiskScanEvent,
   ResourceMonitorErrorEvent,
 ]);

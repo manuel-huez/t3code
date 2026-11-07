@@ -81,11 +81,6 @@ enum Command {
         request_id: String,
         window_ms: u64,
     },
-    DiskSpace {
-        version: u32,
-        request_id: String,
-        path: String,
-    },
     ScanDisk {
         version: u32,
         request_id: String,
@@ -107,7 +102,6 @@ impl Command {
             | Self::SampleNow { version, .. }
             | Self::ProcessTable { version, .. }
             | Self::ReadHistory { version, .. }
-            | Self::DiskSpace { version, .. }
             | Self::ScanDisk { version, .. }
             | Self::Shutdown { version } => *version,
         }
@@ -122,23 +116,6 @@ enum Input {
     /// The server closed stdin. Scan threads hold input senders, so the channel alone never
     /// reports this.
     StdinClosed,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VolumeSpaceEvent {
-    total_bytes: u64,
-    available_bytes: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DiskSpaceEvent<'a> {
-    version: u32,
-    #[serde(rename = "type")]
-    event_type: &'static str,
-    request_id: &'a str,
-    volume: Option<VolumeSpaceEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1115,22 +1092,6 @@ fn main() -> io::Result<()> {
                                 true,
                             )?;
                         }
-                    }
-                    Command::DiskSpace {
-                        request_id, path, ..
-                    } => {
-                        let event = DiskSpaceEvent {
-                            version: PROTOCOL_VERSION,
-                            event_type: "diskSpace",
-                            request_id: &request_id,
-                            volume: disk::volume_space(Path::new(&path)).map(|space| {
-                                VolumeSpaceEvent {
-                                    total_bytes: space.total_bytes,
-                                    available_bytes: space.available_bytes,
-                                }
-                            }),
-                        };
-                        write_event(&mut writer, &event)?;
                     }
                     Command::ScanDisk {
                         request_id,

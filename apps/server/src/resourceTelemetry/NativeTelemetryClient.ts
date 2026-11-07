@@ -3,7 +3,6 @@ import type {
   ResourceMonitorCapabilities,
   ResourceMonitorCommand,
   ResourceMonitorDiskScanEvent,
-  ResourceMonitorDiskSpaceEvent,
   ResourceMonitorEvent,
   ResourceMonitorExternalProcess,
   ResourceMonitorHelloEvent,
@@ -50,7 +49,6 @@ const HANDSHAKE_TIMEOUT = Duration.seconds(5);
 const SAMPLE_REQUEST_TIMEOUT = Duration.seconds(5);
 const PROCESS_TABLE_REQUEST_TIMEOUT = Duration.seconds(5);
 const HISTORY_REQUEST_TIMEOUT = Duration.seconds(15);
-const DISK_SPACE_REQUEST_TIMEOUT = Duration.seconds(5);
 // A walk over a large worktree tree is measured in seconds, and on a slow disk in minutes.
 const DISK_SCAN_REQUEST_TIMEOUT = Duration.minutes(10);
 const INITIAL_RESTART_DELAY = Duration.millis(500);
@@ -84,13 +82,7 @@ export class NativeTelemetryHandshakeTimedOut extends Schema.TaggedError<NativeT
 class NativeTelemetryRequestTimedOut extends Schema.TaggedError<NativeTelemetryRequestTimedOut>()(
   "NativeTelemetryRequestTimedOut",
   {
-    operation: Schema.Literals([
-      "processTable",
-      "readHistory",
-      "sampleNow",
-      "diskSpace",
-      "scanDisk",
-    ]),
+    operation: Schema.Literals(["processTable", "readHistory", "sampleNow", "scanDisk"]),
     timeoutMs: Schema.Number,
   },
 ) {
@@ -210,10 +202,6 @@ export class NativeTelemetryClient extends Context.Service<
       ReadonlyArray<ResourceMonitorProcessTableEntry>,
       NativeTelemetryClientError
     >;
-    /** Free space of the volume holding `path`; null when the monitor cannot read it. */
-    readonly diskSpace: (
-      path: string,
-    ) => Effect.Effect<ResourceMonitorDiskSpaceEvent["volume"], NativeTelemetryClientError>;
     /** Allocated bytes below `root`. The walk runs beside sampling and never delays it. */
     readonly scanDisk: (input: {
       readonly root: string;
@@ -429,8 +417,6 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
   const pendingProcessTables: PendingRequests<ReadonlyArray<ResourceMonitorProcessTableEntry>> =
     yield* Ref.make(new Map());
   const pendingHistories = yield* Ref.make(new Map<string, PendingHistoryRequest>());
-  const pendingDiskSpace: PendingRequests<ResourceMonitorDiskSpaceEvent["volume"]> =
-    yield* Ref.make(new Map());
   const pendingDiskScans: PendingRequests<ResourceMonitorDiskScanEvent> = yield* Ref.make(
     new Map(),
   );
@@ -460,7 +446,6 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
       );
     yield* failAll(pendingSamples);
     yield* failAll(pendingProcessTables);
-    yield* failAll(pendingDiskSpace);
     yield* failAll(pendingDiskScans);
     const histories = yield* Ref.getAndSet(pendingHistories, new Map());
     yield* Effect.forEach(histories.values(), (request) => Deferred.fail(request.deferred, error), {
@@ -533,8 +518,6 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
         });
       case "processTable":
         return resolvePending(pendingProcessTables, event.requestId, event.processes);
-      case "diskSpace":
-        return resolvePending(pendingDiskSpace, event.requestId, event.volume);
       case "diskScan":
         return resolvePending(pendingDiskScans, event.requestId, event);
       case "historyChunk":
@@ -1008,22 +991,6 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     }),
   );
 
-  const diskSpace: NativeTelemetryClient["Service"]["diskSpace"] = Effect.fn(
-    "NativeTelemetryClient.diskSpace",
-  )(function* (path) {
-    return yield* request(
-      pendingDiskSpace,
-      "diskSpace",
-      DISK_SPACE_REQUEST_TIMEOUT,
-      (requestId) => ({
-        version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-        type: "diskSpace",
-        requestId,
-        path,
-      }),
-    );
-  });
-
   const scanDisk: NativeTelemetryClient["Service"]["scanDisk"] = Effect.fn(
     "NativeTelemetryClient.scanDisk",
   )(function* ({ root, depth }) {
@@ -1058,7 +1025,6 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     setHostPowerState,
     sampleNow,
     processTable,
-    diskSpace,
     scanDisk,
     retry: Ref.get(state).pipe(
       Effect.flatMap((current) =>
@@ -1123,13 +1089,6 @@ export const layerTest = (
           reason: "No resource monitor process table was configured for this test.",
         }),
       ),
-      diskSpace: Effect.fn("NativeTelemetryClient.diskSpace")(function () {
-        return Effect.fail(
-          new NativeTelemetryUnavailable({
-            reason: "No disk space was configured for this test.",
-          }),
-        );
-      }),
       scanDisk: Effect.fn("NativeTelemetryClient.scanDisk")(function () {
         return Effect.fail(
           new NativeTelemetryUnavailable({
