@@ -164,7 +164,11 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
           </ul>
         ) : snapshot ? (
           <p className="border-t border-border/60 px-4 py-3 text-xs text-muted-foreground sm:px-5">
-            {scanning ? "Measuring what T3 stores on this disk…" : "No breakdown yet."}
+            {scanning
+              ? "Measuring what T3 stores on this disk…"
+              : snapshot.breakdown.status === "unavailable"
+                ? "The folder breakdown needs the resource monitor, which is not running on this server."
+                : "No breakdown yet."}
           </p>
         ) : null}
         {snapshot?.breakdown.status === "failed" || query.error ? (

@@ -58,15 +58,24 @@ still works.
 
 ## Disk usage
 
-Volume free space is a live `statfs`. The per-location breakdown is a background walk of
-the T3 home directory in [`DiskScan`](../../apps/server/src/resourceTelemetry/DiskScan.ts). It stays in Node rather than
-the native monitor because it needs no extra binary on any install path, and it never
-blocks the event loop. The scan runs only when diagnostics asks, at most once every ten minutes, and
-`read` returns the previous result while a scan is running.
+Free space and the per-location breakdown both come from the native monitor
+([`disk.rs`](../../native/resource-monitor/src/disk.rs)), requested through
+`diskSpace` and `scanDisk`. Space comes from `statvfs` on the T3 home path itself: matching
+mount points would report macOS's sealed system volume, because firmlinks hide the data
+volume from the path. If the monitor is missing, the card still renders and says so.
+
+The scan runs on its own thread, so process sampling never waits for it, and the thread
+stops when the server closes the monitor's stdin. The monitor's input channel is shared with
+that thread, so end of input is an explicit message: the channel alone never reports it.
+The server starts a scan only when diagnostics asks, at most once every ten minutes, and
+`read` returns the previous result while one is running.
 
 - Sizes are allocated blocks, hardlinks count once, symlinks are not followed, and the walk
   stays on one device. APFS clones are reported per file, so macOS can overcount.
+- Directories are keyed to a fixed depth and files one level shallower, so a folder of
+  thousands of attachments adds one entry, not thousands.
 - Rescan requests carry the server timestamp of the snapshot the user saw, not a boolean
   or a client clock. A boolean would rescan on every poll, and a skewed client clock would
   rescan forever.
-- The walk shares the libuv thread pool with the rest of the server, so concurrency is capped.
+- `scanDisk` and `diskSpace` are additive, so the protocol version stays 3. A monitor built
+  before them answers with `invalid-command`, and the request times out.

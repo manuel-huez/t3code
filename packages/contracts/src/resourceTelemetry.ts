@@ -54,7 +54,7 @@ export const DiskUsageSnapshot = Schema.Struct({
   ),
   /** Allocated size of T3's own data. It is a background scan, so it may lag the volume. */
   breakdown: Schema.Struct({
-    status: Schema.Literals(["scanning", "ready", "failed"]),
+    status: Schema.Literals(["scanning", "ready", "failed", "unavailable"]),
     /** When the entries below were measured; null before the first scan completes. */
     scannedAt: Schema.NullOr(NonNegativeInt),
     totalBytes: NonNegativeInt,
@@ -193,6 +193,23 @@ export const ResourceMonitorReadHistoryCommand = Schema.Struct({
 });
 export type ResourceMonitorReadHistoryCommand = typeof ResourceMonitorReadHistoryCommand.Type;
 
+export const ResourceMonitorDiskSpaceCommand = Schema.Struct({
+  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
+  type: Schema.Literal("diskSpace"),
+  requestId: TrimmedNonEmptyString,
+  path: Schema.String,
+});
+export type ResourceMonitorDiskSpaceCommand = typeof ResourceMonitorDiskSpaceCommand.Type;
+
+export const ResourceMonitorScanDiskCommand = Schema.Struct({
+  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
+  type: Schema.Literal("scanDisk"),
+  requestId: TrimmedNonEmptyString,
+  root: Schema.String,
+  depth: PositiveInt,
+});
+export type ResourceMonitorScanDiskCommand = typeof ResourceMonitorScanDiskCommand.Type;
+
 export const ResourceMonitorShutdownCommand = Schema.Struct({
   version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
   type: Schema.Literal("shutdown"),
@@ -207,6 +224,8 @@ export const ResourceMonitorCommand = Schema.Union([
   ResourceMonitorSampleNowCommand,
   ResourceMonitorProcessTableCommand,
   ResourceMonitorReadHistoryCommand,
+  ResourceMonitorDiskSpaceCommand,
+  ResourceMonitorScanDiskCommand,
   ResourceMonitorShutdownCommand,
 ]);
 export type ResourceMonitorCommand = typeof ResourceMonitorCommand.Type;
@@ -261,6 +280,27 @@ export const ResourceMonitorHistoryChunkEvent = Schema.Struct({
 });
 export type ResourceMonitorHistoryChunkEvent = typeof ResourceMonitorHistoryChunkEvent.Type;
 
+export const ResourceMonitorDiskSpaceEvent = Schema.Struct({
+  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
+  type: Schema.Literal("diskSpace"),
+  requestId: TrimmedNonEmptyString,
+  volume: Schema.NullOr(
+    Schema.Struct({ totalBytes: NonNegativeInt, availableBytes: NonNegativeInt }),
+  ),
+});
+export type ResourceMonitorDiskSpaceEvent = typeof ResourceMonitorDiskSpaceEvent.Type;
+
+export const ResourceMonitorDiskScanEvent = Schema.Struct({
+  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
+  type: Schema.Literal("diskScan"),
+  requestId: TrimmedNonEmptyString,
+  totalBytes: NonNegativeInt,
+  /** Allocated bytes per path relative to the scanned root. */
+  entries: Schema.Array(Schema.Struct({ path: Schema.String, bytes: NonNegativeInt })),
+  error: Schema.NullOr(Schema.String),
+});
+export type ResourceMonitorDiskScanEvent = typeof ResourceMonitorDiskScanEvent.Type;
+
 export const ResourceMonitorErrorEvent = Schema.Struct({
   version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
   type: Schema.Literal("error"),
@@ -275,6 +315,8 @@ export const ResourceMonitorEvent = Schema.Union([
   ResourceMonitorSnapshotEvent,
   ResourceMonitorProcessTableEvent,
   ResourceMonitorHistoryChunkEvent,
+  ResourceMonitorDiskSpaceEvent,
+  ResourceMonitorDiskScanEvent,
   ResourceMonitorErrorEvent,
 ]);
 export type ResourceMonitorEvent = typeof ResourceMonitorEvent.Type;
