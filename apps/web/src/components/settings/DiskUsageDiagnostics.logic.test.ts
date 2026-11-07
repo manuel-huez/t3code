@@ -31,14 +31,14 @@ describe("DiskUsageDiagnostics logic", () => {
     expect(diskUsedFraction({ path: "/", totalBytes: 100, availableBytes: 40 })).toBe(0.6);
   });
 
-  it("ranks T3 data against the rest of the disk and hides rows before the first scan", () => {
+  it("lists T3 data largest first, then the rest of the disk, and hides rows before the first scan", () => {
     expect(diskUsageRows(snapshot({ scannedAt: null }))).toEqual([]);
 
     const rows = diskUsageRows(snapshot());
-    expect(rows.map((row) => [row.label, row.bytes])).toEqual([
-      ["Everything else on this disk", 48 * GIB],
-      ["repo/feature", 10 * GIB],
-      ["Attachments", 2 * GIB],
+    expect(rows.map((row) => [row.label, row.bytes, row.showBar])).toEqual([
+      ["repo/feature", 10 * GIB, true],
+      ["Attachments", 2 * GIB, true],
+      ["Everything else on this disk", 48 * GIB, false],
     ]);
   });
 
