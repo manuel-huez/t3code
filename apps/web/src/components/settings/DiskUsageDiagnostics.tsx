@@ -85,10 +85,16 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
                 tone === "danger" && "text-destructive",
               )}
             >
-              {fraction === null ? "..." : `${Math.round(fraction * 100)}%`}
-              <span className="ml-1.5 font-sans text-xs font-normal tracking-normal text-muted-foreground">
-                used
-              </span>
+              {fraction === null
+                ? snapshot
+                  ? "Unavailable"
+                  : "..."
+                : `${Math.round(fraction * 100)}%`}
+              {fraction === null ? null : (
+                <span className="ml-1.5 font-sans text-xs font-normal tracking-normal text-muted-foreground">
+                  used
+                </span>
+              )}
             </div>
             {snapshot?.volume ? (
               <div className="truncate text-3xs text-muted-foreground/60">
@@ -116,7 +122,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
               />
             </div>
           ) : null}
-          {snapshot && snapshot.volume === null ? (
+          {snapshot && snapshot.volume === null && snapshot.breakdown.status !== "unavailable" ? (
             <p className="mt-2 text-xs text-muted-foreground">
               This server cannot report the free space of its data volume.
             </p>
@@ -167,7 +173,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
             {scanning
               ? "Measuring what T3 stores on this disk…"
               : snapshot.breakdown.status === "unavailable"
-                ? "The folder breakdown needs the resource monitor, which is not running on this server."
+                ? "Disk usage needs the resource monitor, which is not running on this server."
                 : "No breakdown yet."}
           </p>
         ) : null}
