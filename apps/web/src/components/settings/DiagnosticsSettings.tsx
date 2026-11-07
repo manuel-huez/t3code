@@ -35,6 +35,7 @@ import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import { ExpandableText } from "./ExpandableText";
+import { DiskUsageDiagnostics } from "./DiskUsageDiagnostics";
 import { ResourceTelemetryDiagnostics } from "./ResourceTelemetryDiagnostics";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -914,6 +915,8 @@ function DiagnosticsSettingsBody() {
   return (
     <SettingsPageContainer width="expanded" className="gap-10">
       <ResourceTelemetryDiagnostics environmentId={environmentId} />
+
+      <DiskUsageDiagnostics environmentId={environmentId} />
 
       <SettingsSection
         title="Live Processes"
