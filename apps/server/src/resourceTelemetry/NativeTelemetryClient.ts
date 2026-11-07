@@ -247,6 +247,24 @@ export interface CollectionControl {
   readonly sampleIntervalMs: number;
 }
 
+type PendingRequests<A> = Ref.Ref<Map<string, Deferred.Deferred<A, NativeTelemetryClientError>>>;
+
+const resolvePending = <A>(pending: PendingRequests<A>, requestId: string, value: A) =>
+  Ref.modify(pending, (requests) => {
+    const next = new Map(requests);
+    const deferred = next.get(requestId);
+    next.delete(requestId);
+    return [Option.fromUndefinedOr(deferred), next] as const;
+  }).pipe(
+    Effect.flatMap(
+      Option.match({
+        onNone: () => Effect.void,
+        onSome: (deferred) => Deferred.succeed(deferred, value),
+      }),
+    ),
+    Effect.asVoid,
+  );
+
 interface PendingHistoryRequest {
   readonly deferred: Deferred.Deferred<
     ReadonlyArray<ResourceMonitorSnapshotEvent>,
@@ -407,24 +425,14 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
   });
   const appliedCollectionControl = yield* Ref.make(yield* Ref.get(collectionControl));
   const externalProcesses = yield* Ref.make<ReadonlyArray<ResourceMonitorExternalProcess>>([]);
-  const pendingSamples = yield* Ref.make(
-    new Map<string, Deferred.Deferred<NativeTelemetrySnapshot, NativeTelemetryClientError>>(),
-  );
-  const pendingProcessTables = yield* Ref.make(
-    new Map<
-      string,
-      Deferred.Deferred<ReadonlyArray<ResourceMonitorProcessTableEntry>, NativeTelemetryClientError>
-    >(),
-  );
+  const pendingSamples: PendingRequests<NativeTelemetrySnapshot> = yield* Ref.make(new Map());
+  const pendingProcessTables: PendingRequests<ReadonlyArray<ResourceMonitorProcessTableEntry>> =
+    yield* Ref.make(new Map());
   const pendingHistories = yield* Ref.make(new Map<string, PendingHistoryRequest>());
-  const pendingDisk = yield* Ref.make(
-    new Map<
-      string,
-      Deferred.Deferred<
-        ResourceMonitorDiskSpaceEvent | ResourceMonitorDiskScanEvent,
-        NativeTelemetryClientError
-      >
-    >(),
+  const pendingDiskSpace: PendingRequests<ResourceMonitorDiskSpaceEvent["volume"]> =
+    yield* Ref.make(new Map());
+  const pendingDiskScans: PendingRequests<ResourceMonitorDiskScanEvent> = yield* Ref.make(
+    new Map(),
   );
   const snapshots = yield* PubSub.sliding<NativeTelemetrySnapshot>(8);
   const healthChanges = yield* PubSub.sliding<NativeTelemetryClientHealth>(4);
@@ -442,19 +450,19 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
   const failPending = Effect.fn("NativeTelemetryClient.failPending")(function* (
     error: NativeTelemetryClientError,
   ) {
-    const samples = yield* Ref.getAndSet(pendingSamples, new Map());
-    const processTables = yield* Ref.getAndSet(pendingProcessTables, new Map());
+    const failAll = <A>(pending: PendingRequests<A>) =>
+      Ref.getAndSet(pending, new Map()).pipe(
+        Effect.flatMap((requests) =>
+          Effect.forEach(requests.values(), (deferred) => Deferred.fail(deferred, error), {
+            discard: true,
+          }),
+        ),
+      );
+    yield* failAll(pendingSamples);
+    yield* failAll(pendingProcessTables);
+    yield* failAll(pendingDiskSpace);
+    yield* failAll(pendingDiskScans);
     const histories = yield* Ref.getAndSet(pendingHistories, new Map());
-    const disk = yield* Ref.getAndSet(pendingDisk, new Map());
-    yield* Effect.forEach(disk.values(), (deferred) => Deferred.fail(deferred, error), {
-      discard: true,
-    });
-    yield* Effect.forEach(samples.values(), (deferred) => Deferred.fail(deferred, error), {
-      discard: true,
-    });
-    yield* Effect.forEach(processTables.values(), (deferred) => Deferred.fail(deferred, error), {
-      discard: true,
-    });
     yield* Effect.forEach(histories.values(), (request) => Deferred.fail(request.deferred, error), {
       discard: true,
     });
@@ -520,48 +528,15 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
           if (healthChanged) yield* publishHealth;
           yield* PubSub.publish(snapshots, nativeSnapshot);
           if (event.requestId) {
-            const deferred = yield* Ref.modify(pendingSamples, (pending) => {
-              const next = new Map(pending);
-              const current = next.get(event.requestId!);
-              next.delete(event.requestId!);
-              return [Option.fromUndefinedOr(current), next];
-            });
-            if (Option.isSome(deferred)) {
-              yield* Deferred.succeed(deferred.value, nativeSnapshot);
-            }
+            yield* resolvePending(pendingSamples, event.requestId, nativeSnapshot);
           }
         });
       case "processTable":
-        return Ref.modify(pendingProcessTables, (pending) => {
-          const next = new Map(pending);
-          const deferred = next.get(event.requestId);
-          next.delete(event.requestId);
-          return [Option.fromUndefinedOr(deferred), next] as const;
-        }).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (deferred) => Deferred.succeed(deferred, event.processes),
-            }),
-          ),
-          Effect.asVoid,
-        );
+        return resolvePending(pendingProcessTables, event.requestId, event.processes);
       case "diskSpace":
+        return resolvePending(pendingDiskSpace, event.requestId, event.volume);
       case "diskScan":
-        return Ref.modify(pendingDisk, (pending) => {
-          const next = new Map(pending);
-          const deferred = next.get(event.requestId);
-          next.delete(event.requestId);
-          return [Option.fromUndefinedOr(deferred), next] as const;
-        }).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (deferred) => Deferred.succeed(deferred, event),
-            }),
-          ),
-          Effect.asVoid,
-        );
+        return resolvePending(pendingDiskScans, event.requestId, event);
       case "historyChunk":
         return Effect.gen(function* () {
           const latestSnapshot = event.snapshots.at(-1);
@@ -964,119 +939,10 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     );
   });
 
-  const sampleNow: NativeTelemetryClient["Service"]["sampleNow"] = Effect.gen(function* () {
-    const current = yield* Ref.get(state);
-    if (!canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) {
-      return yield* new NativeTelemetryUnavailable({
-        reason: Option.getOrElse(current.lastError, () => "sidecar is not running"),
-      });
-    }
-
-    const requestId = yield* random.uuidV4().pipe(
-      Effect.mapError(
-        (cause) =>
-          new NativeTelemetryCommandFailed({
-            operation: "createRequestId",
-            cause,
-          }),
-      ),
-    );
-    const deferred = yield* Deferred.make<NativeTelemetrySnapshot, NativeTelemetryClientError>();
-    yield* Ref.update(pendingSamples, (pending) => {
-      const next = new Map(pending);
-      next.set(requestId, deferred);
-      return next;
-    });
-    return yield* writeCommand(Option.getOrThrow(current.handle), {
-      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-      type: "sampleNow",
-      requestId,
-    }).pipe(
-      Effect.andThen(
-        Deferred.await(deferred).pipe(
-          Effect.timeoutOption(SAMPLE_REQUEST_TIMEOUT),
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                Effect.fail(
-                  new NativeTelemetryRequestTimedOut({
-                    operation: "sampleNow",
-                    timeoutMs: Duration.toMillis(SAMPLE_REQUEST_TIMEOUT),
-                  }),
-                ),
-              onSome: Effect.succeed,
-            }),
-          ),
-        ),
-      ),
-      Effect.ensuring(
-        Ref.update(pendingSamples, (pending) => {
-          const next = new Map(pending);
-          next.delete(requestId);
-          return next;
-        }),
-      ),
-    );
-  });
-
-  const processTable: NativeTelemetryClient["Service"]["processTable"] = Effect.gen(function* () {
-    const current = yield* Ref.get(state);
-    if (!canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) {
-      return yield* new NativeTelemetryUnavailable({
-        reason: Option.getOrElse(current.lastError, () => "sidecar is not running"),
-      });
-    }
-
-    const requestId = yield* random
-      .uuidV4()
-      .pipe(
-        Effect.mapError(
-          (cause) => new NativeTelemetryCommandFailed({ operation: "createRequestId", cause }),
-        ),
-      );
-    const deferred = yield* Deferred.make<
-      ReadonlyArray<ResourceMonitorProcessTableEntry>,
-      NativeTelemetryClientError
-    >();
-    yield* Ref.update(pendingProcessTables, (pending) => {
-      const next = new Map(pending);
-      next.set(requestId, deferred);
-      return next;
-    });
-    return yield* writeCommand(Option.getOrThrow(current.handle), {
-      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-      type: "processTable",
-      requestId,
-    }).pipe(
-      Effect.andThen(
-        Deferred.await(deferred).pipe(
-          Effect.timeoutOption(PROCESS_TABLE_REQUEST_TIMEOUT),
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                Effect.fail(
-                  new NativeTelemetryRequestTimedOut({
-                    operation: "processTable",
-                    timeoutMs: Duration.toMillis(PROCESS_TABLE_REQUEST_TIMEOUT),
-                  }),
-                ),
-              onSome: Effect.succeed,
-            }),
-          ),
-        ),
-      ),
-      Effect.ensuring(
-        Ref.update(pendingProcessTables, (pending) => {
-          const next = new Map(pending);
-          next.delete(requestId);
-          return next;
-        }),
-      ),
-    );
-  });
-
-  const requestDisk = Effect.fnUntraced(function* (
-    operation: "diskSpace" | "scanDisk",
+  // Untraced: each caller is the request's span boundary.
+  const request = Effect.fnUntraced(function* <A>(
+    pending: PendingRequests<A>,
+    operation: NativeTelemetryRequestTimedOut["operation"],
     timeout: Duration.Duration,
     makeCommand: (requestId: string) => ResourceMonitorCommand,
   ) {
@@ -1086,6 +952,7 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
         reason: Option.getOrElse(current.lastError, () => "sidecar is not running"),
       });
     }
+
     const requestId = yield* random
       .uuidV4()
       .pipe(
@@ -1093,11 +960,8 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
           (cause) => new NativeTelemetryCommandFailed({ operation: "createRequestId", cause }),
         ),
       );
-    const deferred = yield* Deferred.make<
-      ResourceMonitorDiskSpaceEvent | ResourceMonitorDiskScanEvent,
-      NativeTelemetryClientError
-    >();
-    yield* Ref.update(pendingDisk, (pending) => new Map(pending).set(requestId, deferred));
+    const deferred = yield* Deferred.make<A, NativeTelemetryClientError>();
+    yield* Ref.update(pending, (requests) => new Map(requests).set(requestId, deferred));
     return yield* writeCommand(Option.getOrThrow(current.handle), makeCommand(requestId)).pipe(
       Effect.andThen(
         Deferred.await(deferred).pipe(
@@ -1117,8 +981,8 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
         ),
       ),
       Effect.ensuring(
-        Ref.update(pendingDisk, (pending) => {
-          const next = new Map(pending);
+        Ref.update(pending, (requests) => {
+          const next = new Map(requests);
           next.delete(requestId);
           return next;
         }),
@@ -1126,41 +990,50 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     );
   });
 
+  const sampleNow: NativeTelemetryClient["Service"]["sampleNow"] = request(
+    pendingSamples,
+    "sampleNow",
+    SAMPLE_REQUEST_TIMEOUT,
+    (requestId) => ({ version: RESOURCE_MONITOR_PROTOCOL_VERSION, type: "sampleNow", requestId }),
+  );
+
+  const processTable: NativeTelemetryClient["Service"]["processTable"] = request(
+    pendingProcessTables,
+    "processTable",
+    PROCESS_TABLE_REQUEST_TIMEOUT,
+    (requestId) => ({
+      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
+      type: "processTable",
+      requestId,
+    }),
+  );
+
   const diskSpace: NativeTelemetryClient["Service"]["diskSpace"] = Effect.fn(
     "NativeTelemetryClient.diskSpace",
   )(function* (path) {
-    const event = yield* requestDisk("diskSpace", DISK_SPACE_REQUEST_TIMEOUT, (requestId) => ({
-      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-      type: "diskSpace",
-      requestId,
-      path,
-    }));
-    if (event.type !== "diskSpace") {
-      return yield* new NativeTelemetryCommandFailed({
-        operation: "diskSpace",
-        cause: `unexpected '${event.type}' response`,
-      });
-    }
-    return event.volume;
+    return yield* request(
+      pendingDiskSpace,
+      "diskSpace",
+      DISK_SPACE_REQUEST_TIMEOUT,
+      (requestId) => ({
+        version: RESOURCE_MONITOR_PROTOCOL_VERSION,
+        type: "diskSpace",
+        requestId,
+        path,
+      }),
+    );
   });
 
   const scanDisk: NativeTelemetryClient["Service"]["scanDisk"] = Effect.fn(
     "NativeTelemetryClient.scanDisk",
   )(function* ({ root, depth }) {
-    const event = yield* requestDisk("scanDisk", DISK_SCAN_REQUEST_TIMEOUT, (requestId) => ({
+    return yield* request(pendingDiskScans, "scanDisk", DISK_SCAN_REQUEST_TIMEOUT, (requestId) => ({
       version: RESOURCE_MONITOR_PROTOCOL_VERSION,
       type: "scanDisk",
       requestId,
       root,
       depth,
     }));
-    if (event.type !== "diskScan") {
-      return yield* new NativeTelemetryCommandFailed({
-        operation: "scanDisk",
-        cause: `unexpected '${event.type}' response`,
-      });
-    }
-    return event;
   });
 
   const health = currentHealth;

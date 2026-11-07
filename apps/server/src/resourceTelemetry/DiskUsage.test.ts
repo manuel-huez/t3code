@@ -5,13 +5,11 @@ import { classifyDiskUsage } from "./DiskUsage.ts";
 const MIB = 1024 * 1024;
 
 const paths = {
-  baseDir: "/home/t3",
-  attachmentsDir: "/home/t3/userdata/attachments",
-  logsDir: "/home/t3/userdata/logs",
-  cachesDir: "/home/t3/caches",
-  stateDir: "/home/t3/userdata",
-  worktreesDir: "/home/t3/worktrees",
-  relative: (from: string, to: string) => to.slice(from.length + 1),
+  attachmentsDir: "userdata/attachments",
+  logsDir: "userdata/logs",
+  cachesDir: "caches",
+  stateDir: "userdata",
+  worktreesDir: "worktrees",
 };
 
 describe("classifyDiskUsage", () => {

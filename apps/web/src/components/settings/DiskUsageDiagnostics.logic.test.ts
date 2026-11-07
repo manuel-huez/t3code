@@ -8,7 +8,7 @@ const GIB = 1024 ** 3;
 
 const snapshot = (overrides: Partial<DiskUsageSnapshot["breakdown"]> = {}): DiskUsageSnapshot => ({
   sampledAt: 1,
-  volume: { path: "/home", totalBytes: 100 * GIB, availableBytes: 40 * GIB },
+  volume: { totalBytes: 100 * GIB, availableBytes: 40 * GIB },
   breakdown: {
     status: "ready",
     scannedAt: 1,
@@ -28,7 +28,7 @@ describe("DiskUsageDiagnostics logic", () => {
     expect(diskUsageTone(0.84)).toBe("default");
     expect(diskUsageTone(0.85)).toBe("warning");
     expect(diskUsageTone(0.95)).toBe("danger");
-    expect(diskUsedFraction({ path: "/", totalBytes: 100, availableBytes: 40 })).toBe(0.6);
+    expect(diskUsedFraction({ totalBytes: 100, availableBytes: 40 })).toBe(0.6);
   });
 
   it("lists T3 data largest first, then the rest of the disk, and hides rows before the first scan", () => {

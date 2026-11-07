@@ -28,8 +28,6 @@ function ScanLabel({ scannedAt, scanning }: { scannedAt: number | null; scanning
 }
 
 export function DiskUsageDiagnostics({ environmentId }: { environmentId: EnvironmentId | null }) {
-  // A rescan request names the server timestamp of the snapshot the user saw, so a client clock
-  // that differs from the server's cannot keep triggering scans.
   const [rescanAfter, setRescanAfter] = useState<number | undefined>(undefined);
   const query = useEnvironmentQuery(
     environmentId === null

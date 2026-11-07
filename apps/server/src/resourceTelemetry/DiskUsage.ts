@@ -48,8 +48,8 @@ export class DiskUsage extends Context.Service<
   }
 >()("t3/resourceTelemetry/DiskUsage") {}
 
+/** Directories are paths relative to the scanned root, with `/` separators. */
 export function classifyDiskUsage(input: {
-  readonly baseDir: string;
   readonly attachmentsDir: string;
   readonly logsDir: string;
   readonly cachesDir: string;
@@ -57,19 +57,20 @@ export function classifyDiskUsage(input: {
   readonly worktreesDir: string;
   readonly totalBytes: number;
   readonly bytesByPath: ReadonlyMap<string, number>;
-  readonly relative: (from: string, to: string) => string;
 }): ScanResult {
-  const rel = (directory: string) => input.relative(input.baseDir, directory).replaceAll("\\", "/");
-  const bytesAt = (directory: string) => input.bytesByPath.get(rel(directory)) ?? 0;
-
+  const owned = (kind: DiskUsageEntry["kind"], path: string): DiskUsageEntry => ({
+    kind,
+    path,
+    bytes: input.bytesByPath.get(path) ?? 0,
+  });
   const entries: Array<DiskUsageEntry> = [
-    { kind: "attachments", path: rel(input.attachmentsDir), bytes: bytesAt(input.attachmentsDir) },
-    { kind: "logs", path: rel(input.logsDir), bytes: bytesAt(input.logsDir) },
-    { kind: "caches", path: rel(input.cachesDir), bytes: bytesAt(input.cachesDir) },
+    owned("attachments", input.attachmentsDir),
+    owned("logs", input.logsDir),
+    owned("caches", input.cachesDir),
   ];
 
-  const statePrefix = `${rel(input.stateDir)}/`;
-  const worktreesPrefix = `${rel(input.worktreesDir)}/`;
+  const statePrefix = `${input.stateDir}/`;
+  const worktreesPrefix = `${input.worktreesDir}/`;
   let databaseBytes = 0;
   for (const [path, bytes] of input.bytesByPath) {
     if (
@@ -82,7 +83,7 @@ export function classifyDiskUsage(input: {
       entries.push({ kind: "worktree", path, bytes });
     }
   }
-  entries.push({ kind: "database", path: rel(input.stateDir), bytes: databaseBytes });
+  entries.push({ kind: "database", path: input.stateDir, bytes: databaseBytes });
 
   const accounted = entries.reduce((sum, entry) => sum + entry.bytes, 0);
   entries.push({ kind: "other", path: ".", bytes: Math.max(0, input.totalBytes - accounted) });
@@ -118,10 +119,9 @@ const make = Effect.fn("makeDiskUsage")(function* () {
     last: null,
   });
 
-  const readVolume = monitor.diskSpace(config.baseDir).pipe(
-    Effect.map((volume) => (volume === null ? null : { path: config.baseDir, ...volume })),
-    Effect.orElseSucceed(() => null),
-  );
+  const readVolume = monitor.diskSpace(config.baseDir).pipe(Effect.orElseSucceed(() => null));
+  const relative = (directory: string) =>
+    path.relative(config.baseDir, directory).replaceAll("\\", "/");
 
   const scan = Effect.fn("DiskUsage.scan")(function* () {
     const outcome = yield* monitor.scanDisk({ root: config.baseDir, depth: SCAN_DEPTH }).pipe(
@@ -131,15 +131,13 @@ const make = Effect.fn("makeDiskUsage")(function* () {
       ),
       Effect.map((event) =>
         classifyDiskUsage({
-          baseDir: config.baseDir,
-          attachmentsDir: config.attachmentsDir,
-          logsDir: config.logsDir,
-          cachesDir: config.providerStatusCacheDir,
-          stateDir: config.stateDir,
-          worktreesDir: config.worktreesDir,
+          attachmentsDir: relative(config.attachmentsDir),
+          logsDir: relative(config.logsDir),
+          cachesDir: relative(config.providerStatusCacheDir),
+          stateDir: relative(config.stateDir),
+          worktreesDir: relative(config.worktreesDir),
           totalBytes: event.totalBytes,
           bytesByPath: new Map(event.entries.map((entry) => [entry.path, entry.bytes])),
-          relative: path.relative,
         }),
       ),
       Effect.tapError((error) => Effect.logWarning(error.message)),
@@ -156,11 +154,14 @@ const make = Effect.fn("makeDiskUsage")(function* () {
     const scannedAt = DateTime.toEpochMillis(yield* DateTime.now);
     yield* Ref.update(state, (current) => ({
       ...current,
-      running: false,
       failure: outcome._tag === "ready" ? null : outcome._tag,
       last: outcome._tag === "ready" ? { scannedAt, result: outcome.result } : current.last,
     }));
   });
+  // A defect or interruption must not leave the card stuck on "scanning".
+  const runScan = scan().pipe(
+    Effect.ensuring(Ref.update(state, (current) => ({ ...current, running: false }))),
+  );
 
   const read = Effect.fn("DiskUsage.read")(function* (input: DiskUsageInput) {
     const now = DateTime.toEpochMillis(yield* DateTime.now);
@@ -174,7 +175,7 @@ const make = Effect.fn("makeDiskUsage")(function* () {
         ? ([false, current] as const)
         : ([true, { ...current, running: true, attemptedAt: now }] as const);
     });
-    if (shouldScan) yield* scan().pipe(Effect.forkIn(scope), Effect.asVoid);
+    if (shouldScan) yield* runScan.pipe(Effect.forkIn(scope), Effect.asVoid);
     return {
       sampledAt: now,
       volume: yield* readVolume,
