@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect's FileSystem has no statfs.
 import * as NodeFSP from "node:fs/promises";
 import type { DiskUsageEntry, DiskUsageInput, DiskUsageSnapshot } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -10,19 +11,23 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import { managedWorktreesDirectories } from "../worktreesDirectory.ts";
 import * as NativeTelemetryClient from "./NativeTelemetryClient.ts";
 
 export class DiskUsageScanError extends Schema.TaggedError<DiskUsageScanError>()(
   "DiskUsageScanError",
-  { baseDir: Schema.String, cause: Schema.Defect() },
+  { root: Schema.String, cause: Schema.Defect() },
 ) {
   override get message(): string {
     return "Failed to measure T3 disk usage.";
   }
 }
 
-// Worktrees are `<repo>/<worktree>` below the home directory, so entries sit three levels down.
+// Worktrees are `worktrees/<repo>/<worktree>` below the home directory, so entries sit three
+// levels down; a worktree folder outside the home holds `<repo>/<worktree>`, two levels down.
 const SCAN_DEPTH = 3;
+const EXTERNAL_WORKTREES_DEPTH = 2;
 const MAX_ENTRIES = 30;
 const RESCAN_AFTER_MS = 10 * 60_000;
 const DATABASE_FILE = /\.sqlite(?:-wal|-shm|-journal)?$/;
@@ -50,7 +55,10 @@ export class DiskUsage extends Context.Service<
   }
 >()("t3/resourceTelemetry/DiskUsage") {}
 
-/** Directories are paths relative to the scanned root, with `/` separators. */
+/**
+ * Directories are paths relative to the T3 home, with `/` separators. Worktrees in a configured
+ * folder outside the home arrive already measured, with absolute paths.
+ */
 export function classifyDiskUsage(input: {
   readonly attachmentsDir: string;
   readonly logsDir: string;
@@ -59,6 +67,8 @@ export function classifyDiskUsage(input: {
   readonly worktreesDir: string;
   readonly totalBytes: number;
   readonly bytesByPath: ReadonlyMap<string, number>;
+  readonly externalWorktrees: ReadonlyArray<{ readonly path: string; readonly bytes: number }>;
+  readonly externalBytes: number;
 }): ScanResult {
   const owned = (kind: DiskUsageEntry["kind"], path: string): DiskUsageEntry => ({
     kind,
@@ -89,9 +99,10 @@ export function classifyDiskUsage(input: {
 
   const accounted = entries.reduce((sum, entry) => sum + entry.bytes, 0);
   entries.push({ kind: "other", path: ".", bytes: Math.max(0, input.totalBytes - accounted) });
+  for (const worktree of input.externalWorktrees) entries.push({ kind: "worktree", ...worktree });
 
   return {
-    totalBytes: input.totalBytes,
+    totalBytes: input.totalBytes + input.externalBytes,
     entries: entries.filter((entry) => entry.bytes > 0).toSorted((a, b) => b.bytes - a.bytes),
   };
 }
@@ -112,6 +123,7 @@ function toBreakdown(state: ScanState): Breakdown {
 const make = Effect.fn("makeDiskUsage")(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const monitor = yield* NativeTelemetryClient.NativeTelemetryClient;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
   const state = yield* Ref.make<ScanState>({
@@ -134,23 +146,56 @@ const make = Effect.fn("makeDiskUsage")(function* () {
   const relative = (directory: string) =>
     path.relative(config.baseDir, directory).replaceAll("\\", "/");
 
-  const scan = Effect.fn("DiskUsage.scan")(function* () {
-    const outcome = yield* monitor.scanDisk({ root: config.baseDir, depth: SCAN_DEPTH }).pipe(
+  const scanRoot = (root: string, depth: number) =>
+    monitor.scanDisk({ root, depth }).pipe(
       Effect.filterOrFail(
         (event) => event.error === null,
-        (event) => new DiskUsageScanError({ baseDir: config.baseDir, cause: event.error }),
+        (event) => new DiskUsageScanError({ root, cause: event.error }),
       ),
-      Effect.map((event) =>
-        classifyDiskUsage({
-          attachmentsDir: relative(config.attachmentsDir),
-          logsDir: relative(config.logsDir),
-          cachesDir: relative(config.providerStatusCacheDir),
-          stateDir: relative(config.stateDir),
-          worktreesDir: relative(config.worktreesDir),
-          totalBytes: event.totalBytes,
-          bytesByPath: new Map(event.entries.map((entry) => [entry.path, entry.bytes])),
-        }),
+    );
+
+  // The configured and previous worktree folders, when they live outside the T3 home.
+  const externalWorktreeRoots = Effect.gen(function* () {
+    const current = yield* settings.getSettings.pipe(Effect.option);
+    if (current._tag === "None") return [];
+    const home = yield* HostProcess.HomeDirectory;
+    return managedWorktreesDirectories(current.value, config.worktreesDir, path, home).filter(
+      (directory) => {
+        const fromHome = path.relative(config.baseDir, directory);
+        return fromHome.startsWith("..") || path.isAbsolute(fromHome);
+      },
+    );
+  });
+
+  const measure = Effect.gen(function* () {
+    const base = yield* scanRoot(config.baseDir, SCAN_DEPTH);
+    const external = yield* Effect.forEach(yield* externalWorktreeRoots, (root) =>
+      // A configured folder that does not exist yet holds no worktrees.
+      scanRoot(root, EXTERNAL_WORKTREES_DEPTH).pipe(
+        Effect.map((event) => ({ root, event })),
+        Effect.option,
       ),
+    );
+    const scanned = external.flatMap((result) => (result._tag === "Some" ? [result.value] : []));
+    return classifyDiskUsage({
+      attachmentsDir: relative(config.attachmentsDir),
+      logsDir: relative(config.logsDir),
+      cachesDir: relative(config.providerStatusCacheDir),
+      stateDir: relative(config.stateDir),
+      worktreesDir: relative(config.worktreesDir),
+      totalBytes: base.totalBytes,
+      bytesByPath: new Map(base.entries.map((entry) => [entry.path, entry.bytes])),
+      externalWorktrees: scanned.flatMap(({ root, event }) =>
+        event.entries
+          .filter((entry) => entry.path.split("/").length === EXTERNAL_WORKTREES_DEPTH)
+          .map((entry) => ({ path: path.join(root, entry.path), bytes: entry.bytes })),
+      ),
+      externalBytes: scanned.reduce((sum, { event }) => sum + event.totalBytes, 0),
+    });
+  });
+
+  const scan = Effect.fn("DiskUsage.scan")(function* () {
+    const outcome = yield* measure.pipe(
       Effect.tapError((error) => Effect.logWarning(error.message)),
       Effect.match({
         onSuccess: (result) => ({ _tag: "ready" as const, result }),

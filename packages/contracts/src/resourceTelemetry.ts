@@ -36,7 +36,7 @@ export type DiskUsageEntryKind = typeof DiskUsageEntryKind.Type;
 
 export const DiskUsageEntry = Schema.Struct({
   kind: DiskUsageEntryKind,
-  /** Path relative to the T3 home directory. */
+  /** Relative to the T3 home, or absolute for a worktree folder outside it. */
   path: Schema.String,
   bytes: NonNegativeInt,
 });
