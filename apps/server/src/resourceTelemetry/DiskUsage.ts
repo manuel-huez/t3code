@@ -177,7 +177,7 @@ const make = Effect.fn("makeDiskUsage")(function* () {
       ),
     );
     const scanned = external.flatMap((result) => (result._tag === "Some" ? [result.value] : []));
-    return classifyDiskUsage({
+    const result = classifyDiskUsage({
       attachmentsDir: relative(config.attachmentsDir),
       logsDir: relative(config.logsDir),
       cachesDir: relative(config.providerStatusCacheDir),
@@ -192,6 +192,18 @@ const make = Effect.fn("makeDiskUsage")(function* () {
       ),
       externalBytes: scanned.reduce((sum, { event }) => sum + event.totalBytes, 0),
     });
+    const home = yield* HostProcess.HomeDirectory;
+    const shown = (absolute: string) =>
+      absolute.startsWith(home + path.sep) ? `~${absolute.slice(home.length)}` : absolute;
+    const absolutePath = (entry: DiskUsageEntry) => {
+      if (entry.kind === "database") return path.join(config.stateDir, "*.sqlite");
+      if (entry.kind === "other") return config.baseDir;
+      return path.isAbsolute(entry.path) ? entry.path : path.join(config.baseDir, entry.path);
+    };
+    return {
+      ...result,
+      entries: result.entries.map((entry) => ({ ...entry, path: shown(absolutePath(entry)) })),
+    };
   });
 
   const scan = Effect.fn("DiskUsage.scan")(function* () {
