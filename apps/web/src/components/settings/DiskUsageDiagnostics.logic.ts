@@ -14,9 +14,16 @@ export function diskUsageTone(fraction: number): "default" | "warning" | "danger
   return "default";
 }
 
-/** Share of T3's data, with one decimal below 10% so small entries do not all read "0%". */
-export function diskUsageShare(bytes: number, totalBytes: number): string {
-  if (totalBytes <= 0) return "0%";
-  const percent = (bytes / totalBytes) * 100;
-  return percent >= 10 ? `${Math.round(percent)}%` : `${percent.toFixed(1)}%`;
+/** Share of the disk's used space, precise enough that small entries do not all read "0%". */
+export function diskUsageShare(
+  bytes: number,
+  volume: NonNullable<DiskUsageSnapshot["volume"]>,
+): string {
+  const usedBytes = volume.totalBytes - volume.availableBytes;
+  if (usedBytes <= 0) return "0%";
+  const percent = (bytes / usedBytes) * 100;
+  if (percent >= 10) return `${Math.round(percent)}%`;
+  if (percent >= 1) return `${percent.toFixed(1)}%`;
+  if (percent >= 0.01) return `${percent.toFixed(2)}%`;
+  return percent > 0 ? "<0.01%" : "0%";
 }

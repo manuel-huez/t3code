@@ -71,7 +71,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
         <StatBlock
           label="T3 Data"
           value={breakdown && scannedAt !== null ? formatBytes(breakdown.totalBytes) : "..."}
-          tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Each row's share is of this total."
+          tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Each row's share is of the disk's used space."
         />
       </StatsGrid>
       {breakdown?.status === "failed" || query.error ? (
@@ -83,8 +83,8 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
       <div className="border-t border-border/60">
         {breakdown && scannedAt !== null ? (
           <DiagnosticsTable
-            headers={["Location", "Path", "Share", "Size"]}
-            columnWidths={["w-[22%]", "w-[50%]", "w-[12%]", "w-[16%]"]}
+            headers={["Location", "Path", "Of Disk Used", "Size"]}
+            columnWidths={["w-[22%]", "w-[46%]", "w-[16%]", "w-[16%]"]}
             minTableWidth="min-w-[480px]"
           >
             {breakdown.entries.map((entry) => (
@@ -95,19 +95,15 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
                     : KIND_LABELS[entry.kind]}
                 </td>
                 <td className="px-4 py-2 text-muted-foreground">
-                  {entry.kind === "other" ? null : (
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={<span className="block truncate">{entry.path}</span>}
-                      />
-                      <TooltipPopup side="top" variant="code">
-                        {entry.path}
-                      </TooltipPopup>
-                    </Tooltip>
-                  )}
+                  <Tooltip>
+                    <TooltipTrigger render={<span className="block truncate">{entry.path}</span>} />
+                    <TooltipPopup side="top" variant="code">
+                      {entry.path}
+                    </TooltipPopup>
+                  </Tooltip>
                 </td>
                 <td className="px-4 py-2 font-mono tabular-nums text-muted-foreground">
-                  {diskUsageShare(entry.bytes, breakdown.totalBytes)}
+                  {volume ? diskUsageShare(entry.bytes, volume) : ""}
                 </td>
                 <td className="px-4 py-2 font-mono tabular-nums sm:pr-5">
                   {formatBytes(entry.bytes)}
@@ -120,7 +116,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
                   {breakdown.omittedEntries} smaller items
                 </td>
                 <td className="px-4 py-2 font-mono tabular-nums">
-                  {diskUsageShare(breakdown.omittedBytes, breakdown.totalBytes)}
+                  {volume ? diskUsageShare(breakdown.omittedBytes, volume) : ""}
                 </td>
                 <td className="px-4 py-2 font-mono tabular-nums sm:pr-5">
                   {formatBytes(breakdown.omittedBytes)}
