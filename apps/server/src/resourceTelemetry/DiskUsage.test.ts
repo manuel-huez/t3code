@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 
-import { classifyDiskUsage, selectAgentFolders } from "./DiskUsage.ts";
+import { classifyDiskUsage, selectExternalFolders, sharedAgentFolders } from "./DiskUsage.ts";
 
 const MIB = 1024 * 1024;
 
@@ -53,23 +53,50 @@ describe("classifyDiskUsage", () => {
     );
   });
 
-  it.effect("gives agent folders one row each, without counting a byte twice", () =>
+  it.effect("gives outside folders one row each, without counting a byte twice", () =>
     Effect.gen(function* () {
-      const folders = selectAgentFolders(
+      const folders = selectExternalFolders(
         [
-          { folder: "/home/u/.codex", label: "Codex" },
-          { folder: "/home/u/.codex", label: "Codex Work" },
-          { folder: "/home/u/.pi/agent", label: "Pi" },
-          { folder: "/home/u/.pi/agent/sessions", label: "Pi" },
-          { folder: "/home/u/.t3/userdata/providers/antigravity/a1", label: "Antigravity" },
+          { folder: "/home/u/.codex", kind: "agent", label: "Codex" },
+          { folder: "/home/u/.codex", kind: "agent", label: "Codex Work" },
+          { folder: "/home/u/.pi/agent", kind: "agent", label: "Pi" },
+          { folder: "/home/u/.pi/agent/sessions", kind: "agent", label: "Pi" },
+          {
+            folder: "/home/u/.t3/userdata/providers/antigravity/a1",
+            kind: "agent",
+            label: "Antigravity",
+          },
+          { folder: "/var/tmp/agents", kind: "agent-temp" },
+          { folder: "/home/u/.cache", kind: "tool-cache" },
         ],
         ["/home/u/.t3"],
         yield* Path.Path,
       );
 
       assert.deepEqual(folders, [
-        { folder: "/home/u/.codex", label: "Codex, Codex Work" },
-        { folder: "/home/u/.pi/agent", label: "Pi" },
+        { folder: "/home/u/.codex", kind: "agent", label: "Codex, Codex Work" },
+        { folder: "/home/u/.pi/agent", kind: "agent", label: "Pi" },
+        { folder: "/var/tmp/agents", kind: "agent-temp" },
+        { folder: "/home/u/.cache", kind: "tool-cache" },
+      ]);
+    }).pipe(Effect.provide(NodePath.layerPosix)),
+  );
+
+  it.effect("finds the temp and tool cache folders agents inherit", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const resolve = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform) =>
+        sharedAgentFolders({ env, platform, home: "/home/u", path }).map((row) => row.folder);
+
+      assert.deepEqual(
+        resolve({ TMPDIR: "/var/tmp/agents", XDG_CACHE_HOME: "/data/cache" }, "linux"),
+        ["/var/tmp/agents", "/data/cache"],
+      );
+      // A relative XDG_CACHE_HOME is invalid under the XDG spec, so the default applies.
+      assert.deepEqual(resolve({ XDG_CACHE_HOME: "cache" }, "linux"), ["/tmp", "/home/u/.cache"]);
+      assert.deepEqual(resolve({ TMPDIR: "/var/folders/x/T", XDG_CACHE_HOME: "/x" }, "darwin"), [
+        "/var/folders/x/T",
+        "/home/u/Library/Caches",
       ]);
     }).pipe(Effect.provide(NodePath.layerPosix)),
   );
