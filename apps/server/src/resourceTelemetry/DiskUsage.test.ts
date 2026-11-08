@@ -13,7 +13,7 @@ const paths = {
 };
 
 describe("classifyDiskUsage", () => {
-  it("attributes T3 data to its owners, largest first, and keeps the remainder", () => {
+  it("attributes T3 data to its owners, including outside worktree folders, largest first", () => {
     const result = classifyDiskUsage({
       ...paths,
       totalBytes: 10 * MIB,
@@ -29,11 +29,16 @@ describe("classifyDiskUsage", () => {
         ["worktrees/repo/feature", 5 * MIB],
         ["worktrees/repo/other", MIB],
       ]),
+      externalWorktrees: [{ path: "/srv/worktrees/repo/big", bytes: 7 * MIB }],
+      externalBytes: 8 * MIB,
     });
+
+    assert.equal(result.totalBytes, 18 * MIB);
 
     assert.deepEqual(
       result.entries.map((entry) => [entry.kind, entry.path, entry.bytes]),
       [
+        ["worktree", "/srv/worktrees/repo/big", 7 * MIB],
         ["worktree", "worktrees/repo/feature", 5 * MIB],
         ["database", "userdata", MIB + MIB / 4],
         ["attachments", "userdata/attachments", MIB],
