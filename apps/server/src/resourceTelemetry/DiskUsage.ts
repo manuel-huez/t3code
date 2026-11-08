@@ -108,31 +108,69 @@ export function classifyDiskUsage(input: {
   };
 }
 
+type ExternalKind = Extract<DiskUsageEntry["kind"], "agent" | "agent-temp" | "tool-cache">;
+interface ExternalFolder {
+  readonly folder: string;
+  readonly kind: ExternalKind;
+  readonly label?: string;
+}
+
 /**
- * Instances that share a folder share a row, and a folder inside another one, or inside a root
- * T3 already measured, is dropped so no byte is counted twice.
+ * Folders outside T3 that agents fill: each provider's data folder, plus the shared temp and
+ * tool cache folders. Folders that share a path share a row, and a folder inside another one,
+ * or inside a root T3 already measured, is dropped so no byte is counted twice.
  */
-export function selectAgentFolders(
-  reported: ReadonlyArray<{ readonly folder: string; readonly label: string }>,
+export function selectExternalFolders(
+  reported: ReadonlyArray<ExternalFolder>,
   measuredRoots: ReadonlyArray<string>,
   path: Pick<Path.Path, "relative" | "isAbsolute">,
-): ReadonlyArray<{ readonly folder: string; readonly label: string }> {
+): ReadonlyArray<ExternalFolder> {
   const isInside = (child: string, parent: string) => {
     const fromParent = path.relative(parent, child);
     return !fromParent.startsWith("..") && !path.isAbsolute(fromParent);
   };
-  const labels = new Map<string, Set<string>>();
-  for (const { folder, label } of reported) {
-    labels.set(folder, (labels.get(folder) ?? new Set()).add(label));
+  const byFolder = new Map<string, { kind: ExternalKind; labels: Set<string> }>();
+  for (const { folder, kind, label } of reported) {
+    const row = byFolder.get(folder) ?? { kind, labels: new Set() };
+    if (label !== undefined) row.labels.add(label);
+    byFolder.set(folder, row);
   }
-  const folders = [...labels.keys()];
-  return [...labels]
+  const folders = [...byFolder.keys()];
+  return [...byFolder]
     .filter(
       ([folder]) =>
         !measuredRoots.some((root) => isInside(folder, root)) &&
         !folders.some((other) => other !== folder && isInside(folder, other)),
     )
-    .map(([folder, names]) => ({ folder, label: [...names].join(", ") }));
+    .map(([folder, { kind, labels }]) =>
+      labels.size === 0 ? { folder, kind } : { folder, kind, label: [...labels].join(", ") },
+    );
+}
+
+/** Agents inherit the server's environment, so they use the same temp and cache folders. */
+export function sharedAgentFolders(input: {
+  readonly env: NodeJS.ProcessEnv;
+  readonly platform: NodeJS.Platform;
+  readonly home: string;
+  readonly path: Pick<Path.Path, "join" | "isAbsolute">;
+}): ReadonlyArray<ExternalFolder> {
+  const { env, platform, home, path } = input;
+  const temp = env.TMPDIR || env.TMP || env.TEMP || (platform === "win32" ? undefined : "/tmp");
+  // Windows has no single cache folder; tools each pick their own under %LOCALAPPDATA%.
+  const xdgCache = env.XDG_CACHE_HOME;
+  const cache =
+    platform === "win32"
+      ? undefined
+      : platform === "darwin"
+        ? path.join(home, "Library", "Caches")
+        : // The XDG spec says to ignore a relative XDG_CACHE_HOME.
+          xdgCache && path.isAbsolute(xdgCache)
+          ? xdgCache
+          : path.join(home, ".cache");
+  return [
+    ...(temp ? [{ folder: temp, kind: "agent-temp" as const }] : []),
+    ...(cache ? [{ folder: cache, kind: "tool-cache" as const }] : []),
+  ];
 }
 
 function toBreakdown(state: ScanState): Breakdown {
@@ -196,18 +234,25 @@ const make = Effect.fn("makeDiskUsage")(function* () {
     );
   });
 
-  const agentDataFolders = Effect.fn("DiskUsage.agentDataFolders")(function* (
+  const externalFolders = Effect.fn("DiskUsage.externalFolders")(function* (
     measuredRoots: ReadonlyArray<string>,
   ) {
-    const reported: Array<{ readonly folder: string; readonly label: string }> = [];
+    const reported: Array<ExternalFolder> = [];
     for (const instance of yield* providers.listInstances) {
       if (!instance.dataDirectories) continue;
       const label = (yield* instance.snapshot.getSnapshot).displayName ?? instance.driverKind;
       for (const directory of yield* instance.dataDirectories) {
-        reported.push({ folder: path.resolve(directory), label });
+        reported.push({ folder: path.resolve(directory), kind: "agent", label });
       }
     }
-    return selectAgentFolders(reported, measuredRoots, path);
+    const shared = sharedAgentFolders({
+      env: yield* HostProcess.Environment,
+      platform: yield* HostProcess.Platform,
+      home: yield* HostProcess.HomeDirectory,
+      path,
+    });
+    for (const folder of shared) reported.push({ ...folder, folder: path.resolve(folder.folder) });
+    return selectExternalFolders(reported, measuredRoots, path);
   });
 
   const measure = Effect.gen(function* () {
@@ -244,14 +289,13 @@ const make = Effect.fn("makeDiskUsage")(function* () {
       if (entry.kind === "other") return config.baseDir;
       return path.isAbsolute(entry.path) ? entry.path : path.join(config.baseDir, entry.path);
     };
-    // Agent folders are not T3 data, so they get rows but stay out of T3's total.
-    const agentEntries = yield* Effect.forEach(
-      yield* agentDataFolders([config.baseDir, ...externalRoots]),
-      ({ folder, label }) =>
+    // Folders outside T3 are not T3 data, so they get rows but stay out of T3's total.
+    const externalEntries = yield* Effect.forEach(
+      yield* externalFolders([config.baseDir, ...externalRoots]),
+      ({ folder, ...row }) =>
         scanRoot(folder, 1).pipe(
           Effect.map((event): DiskUsageEntry => ({
-            kind: "agent",
-            label,
+            ...row,
             path: shown(folder),
             bytes: event.totalBytes,
           })),
@@ -262,7 +306,7 @@ const make = Effect.fn("makeDiskUsage")(function* () {
       ...result,
       entries: [
         ...result.entries.map((entry) => ({ ...entry, path: shown(absolutePath(entry)) })),
-        ...agentEntries.flatMap((entry) => (entry._tag === "Some" ? [entry.value] : [])),
+        ...externalEntries.flatMap((entry) => (entry._tag === "Some" ? [entry.value] : [])),
       ]
         .filter((entry) => entry.bytes > 0)
         .toSorted((a, b) => b.bytes - a.bytes),

@@ -1,6 +1,6 @@
 import type { DiskUsageEntry, DiskUsageEntryKind, EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import { AlertTriangleIcon, ChartPieIcon } from "lucide-react";
+import { AlertTriangleIcon, ChartPieIcon, InfoIcon } from "lucide-react";
 import { useState } from "react";
 
 import { formatBytes } from "../../lib/formatBytes";
@@ -24,6 +24,15 @@ const KIND_LABELS: Record<Exclude<DiskUsageEntryKind, "worktree" | "agent">, str
   logs: "Logs",
   caches: "T3 caches",
   other: "Other T3 data",
+  "agent-temp": "Agent temp files",
+  "tool-cache": "Tool caches",
+};
+
+const KIND_DESCRIPTIONS: Partial<Record<DiskUsageEntryKind, string>> = {
+  "agent-temp":
+    "Scratch files that agents and their commands write while they work, in the folder set by TMPDIR. Other programs on this machine can also write here.",
+  "tool-cache":
+    "Caches of build tools, package managers and linters that agents run, such as Go, npm and pip. Other programs on this machine share this folder.",
 };
 
 function entryLabel(entry: DiskUsageEntry): string {
@@ -88,7 +97,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
                 ? "..."
                 : "Unavailable"
           }
-          tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Agent data rows are not included."
+          tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Agent data, agent temp file and tool cache rows are not included."
         />
       </StatsGrid>
       {breakdown?.status === "failed" || query.error ? (
@@ -106,7 +115,29 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
           >
             {breakdown.entries.map((entry) => (
               <tr key={`${entry.kind}:${entry.path}`} className="hover:bg-muted/20">
-                <td className="truncate px-4 py-2 sm:pl-5">{entryLabel(entry)}</td>
+                <td className="px-4 py-2 sm:pl-5">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="min-w-0 truncate">{entryLabel(entry)}</span>
+                    {KIND_DESCRIPTIONS[entry.kind] ? (
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <button
+                              type="button"
+                              className="inline-flex size-3.5 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground"
+                              aria-label={`${entryLabel(entry)} details`}
+                            >
+                              <InfoIcon className="size-3" />
+                            </button>
+                          }
+                        />
+                        <TooltipPopup side="top">
+                          <span className="block max-w-72">{KIND_DESCRIPTIONS[entry.kind]}</span>
+                        </TooltipPopup>
+                      </Tooltip>
+                    ) : null}
+                  </div>
+                </td>
                 <td className="px-4 py-2 text-muted-foreground">
                   <Tooltip>
                     <TooltipTrigger render={<span className="block truncate">{entry.path}</span>} />

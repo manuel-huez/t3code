@@ -33,6 +33,10 @@ export const DiskUsageEntryKind = Schema.Literals([
   "other",
   /** A provider agent's own state folder, such as `~/.codex`; not part of T3's total. */
   "agent",
+  /** The temp folder agents inherit (`TMPDIR`); shared, not part of T3's total. */
+  "agent-temp",
+  /** The user cache folder of the tools agents run (`XDG_CACHE_HOME`); shared, not part of T3's total. */
+  "tool-cache",
 ]);
 export type DiskUsageEntryKind = typeof DiskUsageEntryKind.Type;
 

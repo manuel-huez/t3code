@@ -66,7 +66,9 @@ tree, so it runs in the native monitor
 server's shared libuv thread pool. It also scans configured and previous worktree folders
 outside the T3 home, since worktrees are usually the largest T3 data. Agent folders come
 from each provider instance's `dataDirectories`, resolved the same way the driver launches
-the agent, and are listed apart from the T3 total because T3 does not own them. Without the
+the agent. The temp folder (`TMPDIR`) and the user cache folder (`XDG_CACHE_HOME`, or
+`~/Library/Caches` on macOS) come from the server's environment, which agents inherit. These
+rows are listed apart from the T3 total because T3 does not own them. Without the
 monitor, the card shows free space and says the breakdown is unavailable.
 
 The scan runs on its own thread, so process sampling never waits for it. That thread holds
