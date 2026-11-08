@@ -375,6 +375,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       displayName,
       accentColor,
       enabled,
+      dataDirectories: Effect.succeed([configDir]),
       snapshot,
       invalidateCaches: Cache.invalidateAll(capabilitiesProbeCache),
       snapshotForCwd: (cwd: string) =>

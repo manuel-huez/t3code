@@ -23,7 +23,11 @@ import * as OpenCode2AdapterV2 from "./v2/adapter.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
-import { openCodeUsageReader, type OpenCodeUsageReaderEnv } from "./usage.ts";
+import {
+  openCodeUsageReader,
+  resolveOpenCodeDataDirs,
+  type OpenCodeUsageReaderEnv,
+} from "./usage.ts";
 import { readOpenCodeGoUsageLimits } from "./usageLimits.ts";
 import { loadOpenCode2Catalog } from "./openCode2Catalog.ts";
 import {
@@ -494,6 +498,10 @@ export const OpenCodeDriver: ProviderDriver<
       displayName,
       accentColor,
       enabled,
+      dataDirectories: resolveOpenCodeDataDirs(processEnv).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, pathService),
+      ),
       snapshot,
       snapshotForCwd: (cwd) =>
         !effectiveConfig.enabled
