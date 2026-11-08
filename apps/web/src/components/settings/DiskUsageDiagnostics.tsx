@@ -47,8 +47,10 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
   const breakdown = snapshot?.breakdown;
   const scanning = breakdown?.status === "scanning";
   const scannedAt = breakdown?.scannedAt ?? null;
+  // Without a first answer, a failed request ends the wait; an older server never answers.
+  const loading = snapshot === null && query.error === null;
   const fraction = volume ? diskUsedFraction(volume) : null;
-  const volumeValue = (value: string) => (volume ? value : snapshot ? "Unavailable" : "...");
+  const volumeValue = (value: string) => (volume ? value : loading ? "..." : "Unavailable");
 
   return (
     <SettingsSection
@@ -56,13 +58,15 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
       icon={<ChartPieIcon className="size-4 text-muted-foreground" />}
       headerAction={
         <div className="flex items-center gap-1.5">
-          <DiagnosticsLastChecked
-            checkedAt={scannedAt === null ? null : DateTime.makeUnsafe(scannedAt)}
-          />
+          {snapshot === null && !loading ? null : (
+            <DiagnosticsLastChecked
+              checkedAt={scannedAt === null ? null : DateTime.makeUnsafe(scannedAt)}
+            />
+          )}
           <DiagnosticsRefreshButton
-            isPending={scanning || snapshot === null}
+            isPending={scanning || loading}
             label="Rescan disk usage"
-            onClick={() => setRescanAfter(snapshot?.sampledAt)}
+            onClick={() => (snapshot ? setRescanAfter(snapshot.sampledAt) : query.refresh())}
           />
         </div>
       }
@@ -77,7 +81,13 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
         <StatBlock label="Disk Size" value={volumeValue(formatBytes(volume?.totalBytes ?? 0))} />
         <StatBlock
           label="T3 Data"
-          value={breakdown && scannedAt !== null ? formatBytes(breakdown.totalBytes) : "..."}
+          value={
+            breakdown && scannedAt !== null
+              ? formatBytes(breakdown.totalBytes)
+              : loading || scanning
+                ? "..."
+                : "Unavailable"
+          }
           tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Agent data rows are not included."
         />
       </StatsGrid>
@@ -132,7 +142,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
             label={
               breakdown?.status === "unavailable"
                 ? "The breakdown needs the resource monitor, which is not running on this server."
-                : breakdown?.status === "failed"
+                : breakdown?.status === "failed" || query.error
                   ? "No breakdown yet."
                   : "Measuring what T3 stores on this disk…"
             }
