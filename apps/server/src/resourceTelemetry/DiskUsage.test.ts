@@ -1,6 +1,9 @@
+import * as NodePath from "@effect/platform-node/NodePath";
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Path from "effect/Path";
 
-import { classifyDiskUsage } from "./DiskUsage.ts";
+import { classifyDiskUsage, selectAgentFolders } from "./DiskUsage.ts";
 
 const MIB = 1024 * 1024;
 
@@ -49,4 +52,25 @@ describe("classifyDiskUsage", () => {
       ],
     );
   });
+
+  it.effect("gives agent folders one row each, without counting a byte twice", () =>
+    Effect.gen(function* () {
+      const folders = selectAgentFolders(
+        [
+          { folder: "/home/u/.codex", label: "Codex" },
+          { folder: "/home/u/.codex", label: "Codex Work" },
+          { folder: "/home/u/.pi/agent", label: "Pi" },
+          { folder: "/home/u/.pi/agent/sessions", label: "Pi" },
+          { folder: "/home/u/.t3/userdata/providers/antigravity/a1", label: "Antigravity" },
+        ],
+        ["/home/u/.t3"],
+        yield* Path.Path,
+      );
+
+      assert.deepEqual(folders, [
+        { folder: "/home/u/.codex", label: "Codex, Codex Work" },
+        { folder: "/home/u/.pi/agent", label: "Pi" },
+      ]);
+    }).pipe(Effect.provide(NodePath.layerPosix)),
+  );
 });

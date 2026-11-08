@@ -31,11 +31,15 @@ export const DiskUsageEntryKind = Schema.Literals([
   "caches",
   "worktree",
   "other",
+  /** A provider agent's own state folder, such as `~/.codex`; not part of T3's total. */
+  "agent",
 ]);
 export type DiskUsageEntryKind = typeof DiskUsageEntryKind.Type;
 
 export const DiskUsageEntry = Schema.Struct({
   kind: DiskUsageEntryKind,
+  /** For an agent folder, the provider instances that use it. */
+  label: Schema.optionalKey(Schema.String),
   /** Absolute on the server, with its user home shown as `~`. */
   path: Schema.String,
   bytes: NonNegativeInt,
