@@ -64,8 +64,10 @@ firmlinks hide the data volume from the path. The per-location breakdown walks t
 tree, so it runs in the native monitor
 ([`disk.rs`](../../native/resource-monitor/src/disk.rs)) through `scanDisk`, outside the
 server's shared libuv thread pool. It also scans configured and previous worktree folders
-outside the T3 home, since worktrees are usually the largest T3 data. Without the monitor, the card shows free space and says
-the breakdown is unavailable.
+outside the T3 home, since worktrees are usually the largest T3 data. Agent folders come
+from each provider instance's `dataDirectories`, resolved the same way the driver launches
+the agent, and are listed apart from the T3 total because T3 does not own them. Without the
+monitor, the card shows free space and says the breakdown is unavailable.
 
 The scan runs on its own thread, so process sampling never waits for it. That thread holds
 a sender to the monitor's input channel, so end of input is an explicit message: the

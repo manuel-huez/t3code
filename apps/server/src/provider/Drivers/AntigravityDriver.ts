@@ -526,6 +526,8 @@ export const AntigravityDriver: ProviderDriver<
       displayName,
       accentColor,
       enabled,
+      // GEMINI_HOME is this private profile; ~/.gemini only lends it shared skills.
+      dataDirectories: Effect.succeed([directories.profile]),
       snapshot: provider.snapshot,
       snapshotForCwd: (cwd) =>
         !enabled

@@ -11,6 +11,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { managedWorktreesDirectories } from "../worktreesDirectory.ts";
 import * as NativeTelemetryClient from "./NativeTelemetryClient.ts";
@@ -107,6 +108,33 @@ export function classifyDiskUsage(input: {
   };
 }
 
+/**
+ * Instances that share a folder share a row, and a folder inside another one, or inside a root
+ * T3 already measured, is dropped so no byte is counted twice.
+ */
+export function selectAgentFolders(
+  reported: ReadonlyArray<{ readonly folder: string; readonly label: string }>,
+  measuredRoots: ReadonlyArray<string>,
+  path: Pick<Path.Path, "relative" | "isAbsolute">,
+): ReadonlyArray<{ readonly folder: string; readonly label: string }> {
+  const isInside = (child: string, parent: string) => {
+    const fromParent = path.relative(parent, child);
+    return !fromParent.startsWith("..") && !path.isAbsolute(fromParent);
+  };
+  const labels = new Map<string, Set<string>>();
+  for (const { folder, label } of reported) {
+    labels.set(folder, (labels.get(folder) ?? new Set()).add(label));
+  }
+  const folders = [...labels.keys()];
+  return [...labels]
+    .filter(
+      ([folder]) =>
+        !measuredRoots.some((root) => isInside(folder, root)) &&
+        !folders.some((other) => other !== folder && isInside(folder, other)),
+    )
+    .map(([folder, names]) => ({ folder, label: [...names].join(", ") }));
+}
+
 function toBreakdown(state: ScanState): Breakdown {
   const entries = state.last?.result.entries ?? [];
   const omitted = entries.slice(MAX_ENTRIES);
@@ -124,6 +152,7 @@ const make = Effect.fn("makeDiskUsage")(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const monitor = yield* NativeTelemetryClient.NativeTelemetryClient;
   const settings = yield* ServerSettings.ServerSettingsService;
+  const providers = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
   const state = yield* Ref.make<ScanState>({
@@ -167,9 +196,24 @@ const make = Effect.fn("makeDiskUsage")(function* () {
     );
   });
 
+  const agentDataFolders = Effect.fn("DiskUsage.agentDataFolders")(function* (
+    measuredRoots: ReadonlyArray<string>,
+  ) {
+    const reported: Array<{ readonly folder: string; readonly label: string }> = [];
+    for (const instance of yield* providers.listInstances) {
+      if (!instance.dataDirectories) continue;
+      const label = (yield* instance.snapshot.getSnapshot).displayName ?? instance.driverKind;
+      for (const directory of yield* instance.dataDirectories) {
+        reported.push({ folder: path.resolve(directory), label });
+      }
+    }
+    return selectAgentFolders(reported, measuredRoots, path);
+  });
+
   const measure = Effect.gen(function* () {
     const base = yield* scanRoot(config.baseDir, SCAN_DEPTH);
-    const external = yield* Effect.forEach(yield* externalWorktreeRoots, (root) =>
+    const externalRoots = yield* externalWorktreeRoots;
+    const external = yield* Effect.forEach(externalRoots, (root) =>
       // A configured folder that does not exist yet holds no worktrees.
       scanRoot(root, EXTERNAL_WORKTREES_DEPTH).pipe(
         Effect.map((event) => ({ root, event })),
@@ -200,9 +244,28 @@ const make = Effect.fn("makeDiskUsage")(function* () {
       if (entry.kind === "other") return config.baseDir;
       return path.isAbsolute(entry.path) ? entry.path : path.join(config.baseDir, entry.path);
     };
+    // Agent folders are not T3 data, so they get rows but stay out of T3's total.
+    const agentEntries = yield* Effect.forEach(
+      yield* agentDataFolders([config.baseDir, ...externalRoots]),
+      ({ folder, label }) =>
+        scanRoot(folder, 1).pipe(
+          Effect.map((event): DiskUsageEntry => ({
+            kind: "agent",
+            label,
+            path: shown(folder),
+            bytes: event.totalBytes,
+          })),
+          Effect.option,
+        ),
+    );
     return {
       ...result,
-      entries: result.entries.map((entry) => ({ ...entry, path: shown(absolutePath(entry)) })),
+      entries: [
+        ...result.entries.map((entry) => ({ ...entry, path: shown(absolutePath(entry)) })),
+        ...agentEntries.flatMap((entry) => (entry._tag === "Some" ? [entry.value] : [])),
+      ]
+        .filter((entry) => entry.bytes > 0)
+        .toSorted((a, b) => b.bytes - a.bytes),
     };
   });
 

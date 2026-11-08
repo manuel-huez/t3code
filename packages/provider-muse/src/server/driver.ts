@@ -23,7 +23,7 @@ import { makeManagedServerProvider } from "@t3tools/provider-core/server/managed
 import { enrichMuseSnapshot, latestMuseVersion, museMaintenance } from "./maintenance.ts";
 import { makeMuseEnvironment } from "./sdk.ts";
 import { museUsageReader } from "./usage.ts";
-import type * as MuseUsageHome from "./MuseUsageHome.ts";
+import * as MuseUsageHome from "./MuseUsageHome.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -53,7 +53,8 @@ export type MuseDriverEnv =
   | HttpClient.HttpClient
   | ProviderLatestVersions.ProviderLatestVersions
   | Path.Path
-  | ProviderEventLoggers.ProviderEventLoggers;
+  | ProviderEventLoggers.ProviderEventLoggers
+  | MuseUsageHome.MuseUsageHome;
 
 export const MuseDriver: ProviderDriver<
   MuseSettings,
@@ -83,6 +84,7 @@ export const MuseDriver: ProviderDriver<
     const { cwd } = host.paths;
     const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
     const hostEnvironment = yield* HostProcess.Environment;
+    const usageHome = yield* MuseUsageHome.MuseUsageHome;
     // Drop an inherited META_API_KEY so Muse uses its login; an instance value still wins.
     const processEnvironment = yield* mergeProviderInstanceEnvironment(
       environment,
@@ -196,6 +198,10 @@ export const MuseDriver: ProviderDriver<
       displayName,
       accentColor,
       enabled,
+      // Muse reports its home itself; the lookup is cached per binary and environment.
+      dataDirectories: usageHome
+        .resolve({ binaryPath: effectiveConfig.binaryPath, environment: processEnvironment })
+        .pipe(Effect.map((home) => (home ? [home] : []))),
       snapshot: { ...snapshot, resolveMaintenance },
       orchestrationAdapter,
       textGeneration,

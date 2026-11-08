@@ -160,6 +160,16 @@ function piLaunchSessionDir(launchArgs: string): string | undefined {
   return sessionDir;
 }
 
+/** Pi's agent state folder for a provider environment, matching Pi's own lookup. */
+export function resolvePiAgentDir(
+  environment: NodeJS.ProcessEnv,
+  home: string,
+  path: Path.Path,
+): string {
+  const agentDir = environment.PI_CODING_AGENT_DIR?.trim();
+  return path.resolve(agentDir ? expandHomePath(agentDir, home) : path.join(home, ".pi", "agent"));
+}
+
 /** Where Pi stores session JSONL files for a provider environment, matching Pi's own lookup. */
 export function resolvePiSessionsDir(
   environment: NodeJS.ProcessEnv,
@@ -168,9 +178,5 @@ export function resolvePiSessionsDir(
 ): string {
   const sessionDir = environment.PI_CODING_AGENT_SESSION_DIR?.trim();
   if (sessionDir) return path.resolve(expandHomePath(sessionDir, home));
-  const agentDir = environment.PI_CODING_AGENT_DIR?.trim();
-  return path.resolve(
-    agentDir ? expandHomePath(agentDir, home) : path.join(home, ".pi", "agent"),
-    "sessions",
-  );
+  return path.join(resolvePiAgentDir(environment, home, path), "sessions");
 }

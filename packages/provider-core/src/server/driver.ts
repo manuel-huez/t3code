@@ -45,6 +45,11 @@ export interface ProviderInstance {
   ) => Effect.Effect<ProviderWorkspaceSnapshot, ProviderDriverError>;
   readonly refreshModels?: () => Effect.Effect<void, ProviderDriverError>;
   readonly invalidateCaches?: Effect.Effect<void>;
+  /**
+   * Folders where this instance's agent keeps its own state, such as sessions and caches,
+   * for disk usage. Omit when the agent's location is unknown; it is then not reported.
+   */
+  readonly dataDirectories?: Effect.Effect<ReadonlyArray<string>>;
   readonly consumeResetCredit?: () => Effect.Effect<
     ProviderConsumeResetCreditOutcome,
     ProviderDriverError
