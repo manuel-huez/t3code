@@ -1,6 +1,6 @@
 import type { DiskUsageEntry, DiskUsageEntryKind, EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import { AlertTriangleIcon } from "lucide-react";
+import { AlertTriangleIcon, ChartPieIcon } from "lucide-react";
 import { useState } from "react";
 
 import { formatBytes } from "../../lib/formatBytes";
@@ -52,7 +52,8 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
 
   return (
     <SettingsSection
-      title="Disk Usage"
+      title="Disk usage"
+      icon={<ChartPieIcon className="size-4 text-muted-foreground" />}
       headerAction={
         <div className="flex items-center gap-1.5">
           <DiagnosticsLastChecked

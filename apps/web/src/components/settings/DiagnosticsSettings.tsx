@@ -51,7 +51,6 @@ import {
   StatBlock,
   StatsGrid,
 } from "./diagnosticsLayout";
-import { DiskUsageDiagnostics } from "./DiskUsageDiagnostics";
 import { ResourceTelemetryDiagnostics } from "./ResourceTelemetryDiagnostics";
 import { formatCpuTime } from "./ResourceTelemetryDiagnostics.logic";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
@@ -823,8 +822,6 @@ function DiagnosticsSettingsBody() {
   return (
     <SettingsPageContainer width="expanded" className="gap-10">
       <ResourceTelemetryDiagnostics environmentId={environmentId} />
-
-      <DiskUsageDiagnostics environmentId={environmentId} />
 
       <SettingsSection
         title={gt("Live Processes")}
