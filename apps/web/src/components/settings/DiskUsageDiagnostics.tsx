@@ -1,4 +1,4 @@
-import type { DiskUsageEntryKind, EnvironmentId } from "@t3tools/contracts";
+import type { DiskUsageEntry, DiskUsageEntryKind, EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { AlertTriangleIcon } from "lucide-react";
 import { useState } from "react";
@@ -18,13 +18,19 @@ import { diskUsageShare, diskUsageTone, diskUsedFraction } from "./DiskUsageDiag
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsSection } from "./settingsLayout";
 
-const KIND_LABELS: Record<Exclude<DiskUsageEntryKind, "worktree">, string> = {
+const KIND_LABELS: Record<Exclude<DiskUsageEntryKind, "worktree" | "agent">, string> = {
   attachments: "Attachments",
   database: "Database",
   logs: "Logs",
-  caches: "Caches",
+  caches: "T3 caches",
   other: "Other T3 data",
 };
+
+function entryLabel(entry: DiskUsageEntry): string {
+  if (entry.kind === "worktree") return entry.path.split(/[\\/]/).slice(-2).join("/");
+  if (entry.kind === "agent") return `${entry.label ?? "Agent"} data`;
+  return KIND_LABELS[entry.kind];
+}
 
 export function DiskUsageDiagnostics({ environmentId }: { environmentId: EnvironmentId | null }) {
   const [rescanAfter, setRescanAfter] = useState<number | undefined>(undefined);
@@ -71,7 +77,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
         <StatBlock
           label="T3 Data"
           value={breakdown && scannedAt !== null ? formatBytes(breakdown.totalBytes) : "..."}
-          tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Each row's share is of the disk's used space."
+          tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Agent data rows are not included."
         />
       </StatsGrid>
       {breakdown?.status === "failed" || query.error ? (
@@ -89,11 +95,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
           >
             {breakdown.entries.map((entry) => (
               <tr key={`${entry.kind}:${entry.path}`} className="hover:bg-muted/20">
-                <td className="truncate px-4 py-2 sm:pl-5">
-                  {entry.kind === "worktree"
-                    ? entry.path.split(/[\\/]/).slice(-2).join("/")
-                    : KIND_LABELS[entry.kind]}
-                </td>
+                <td className="truncate px-4 py-2 sm:pl-5">{entryLabel(entry)}</td>
                 <td className="px-4 py-2 text-muted-foreground">
                   <Tooltip>
                     <TooltipTrigger render={<span className="block truncate">{entry.path}</span>} />

@@ -2,6 +2,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import { vi } from "vite-plus/test";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
 import * as CodexManagedTokenBroker from "./CodexManagedTokenBroker.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -341,6 +342,7 @@ const layerTestNodeServices = Layer.mergeAll(
   Layer.mock(CodexInstallation.CodexInstallation)({
     managedDirectory: "unused-managed-installation",
   }),
+  Layer.mock(MuseUsageHome.MuseUsageHome)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
     getEnvironmentId: Effect.succeed(EnvironmentId.make("00000000-0000-4000-8000-000000000001")),
