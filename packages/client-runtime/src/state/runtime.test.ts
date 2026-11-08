@@ -103,11 +103,13 @@ const makeEnvironmentQueryHarness = Effect.fn("TestEnvironmentQuery.makeHarness"
     initialState,
     rpcSession,
     isFinal,
+    stopOnFailure,
     onAnswer,
   }: {
     readonly refreshTrigger?: Atom.Atom<unknown>;
     readonly onAnswer?: QueryAnswerHandler<undefined, A>;
     readonly isFinal?: (value: A) => boolean;
+    readonly stopOnFailure?: boolean;
     readonly idleTtlMs?: number;
     readonly persistence?: QueryPersistence<A>;
     readonly initialState?: SupervisorConnectionState;
@@ -155,6 +157,7 @@ const makeEnvironmentQueryHarness = Effect.fn("TestEnvironmentQuery.makeHarness"
     ...(refreshTrigger === undefined ? {} : { refreshTrigger: () => refreshTrigger }),
     ...(idleTtlMs === undefined ? {} : { idleTtlMs }),
     ...(isFinal === undefined ? {} : { isFinal }),
+    ...(stopOnFailure === undefined ? {} : { stopOnFailure }),
     ...(onAnswer === undefined ? {} : { onAnswer }),
   });
 
@@ -1110,6 +1113,36 @@ describe("environment query lifecycle", () => {
         expect(yield* readEnvironmentQuery(registry, atom)).toEqual({
           fork: { title: "Fork", projectId: supported ? projectId : null },
         });
+      }),
+    ),
+  );
+
+  it.effect("stops refreshing after a failure when told to, until refreshed by hand", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let executions = 0;
+        const trigger = Atom.make(0).pipe(Atom.keepAlive);
+        const harness = yield* makeEnvironmentQueryHarness(
+          Effect.suspend(() => {
+            executions += 1;
+            return Effect.fail("unknown method");
+          }),
+          { refreshTrigger: trigger, stopOnFailure: true },
+        );
+        const registry = AtomRegistry.make();
+        yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
+        const settle = Effect.exit(
+          AtomRegistry.getResult(registry, harness.atom, { suspendOnWaiting: true }),
+        );
+        const unmount = registry.mount(harness.atom);
+        yield* settle;
+        registry.set(trigger, 1);
+        expect(executions).toBe(1);
+
+        registry.refresh(harness.atom);
+        yield* settle;
+        expect(executions).toBe(2);
+        unmount();
       }),
     ),
   );
