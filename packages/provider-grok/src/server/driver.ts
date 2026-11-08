@@ -44,6 +44,7 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "@t3tools/provider-core/server/snapshotSettings";
+import { resolveGrokHome } from "./home.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("grok");
@@ -252,6 +253,10 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv, Path.Path> 
       displayName,
       accentColor,
       enabled,
+      dataDirectories: resolveGrokHome(processEnv).pipe(
+        Effect.map((home) => [home]),
+        Effect.provideService(Path.Path, path),
+      ),
       snapshot,
       snapshotForCwd,
       orchestrationAdapter,

@@ -1318,6 +1318,16 @@ export function createServerEnvironmentAtoms<R, E>(
       execute: (input: EnvironmentRpcInput<typeof WS_METHODS.serverGetHostResources>) =>
         request(WS_METHODS.serverGetHostResources, input).pipe(Effect.timeout("5 seconds")),
     }),
+    diskUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:disk-usage",
+      tag: WS_METHODS.serverGetDiskUsage,
+      staleTimeMs: 5_000,
+      refreshIntervalMs: 2_000,
+      // Poll only until the scan settles; opening the card or rescanning fetches again.
+      isFinal: (snapshot) => snapshot.breakdown.status !== "scanning",
+      stopOnFailure: true,
+      idleTtlMs: 0,
+    }),
     processResourceHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,

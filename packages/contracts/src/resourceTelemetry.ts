@@ -15,6 +15,58 @@ export const HostResourcesSnapshot = Schema.Struct({
 });
 export type HostResourcesSnapshot = typeof HostResourcesSnapshot.Type;
 
+export const DiskUsageInput = Schema.Struct({
+  /**
+   * Rescan unless a scan already started at or after this server timestamp. Clients pass the
+   * `sampledAt` of the snapshot they are looking at, so repeated polls cannot trigger a loop.
+   */
+  rescanAfter: Schema.optional(NonNegativeInt),
+});
+export type DiskUsageInput = typeof DiskUsageInput.Type;
+
+export const DiskUsageEntryKind = Schema.Literals([
+  "attachments",
+  "database",
+  "logs",
+  "caches",
+  "worktree",
+  "other",
+  /** A provider agent's own state folder, such as `~/.codex`; not part of T3's total. */
+  "agent",
+]);
+export type DiskUsageEntryKind = typeof DiskUsageEntryKind.Type;
+
+export const DiskUsageEntry = Schema.Struct({
+  kind: DiskUsageEntryKind,
+  /** For an agent folder, the provider instances that use it. */
+  label: Schema.optionalKey(Schema.String),
+  /** Absolute on the server, with its user home shown as `~`. */
+  path: Schema.String,
+  bytes: NonNegativeInt,
+});
+export type DiskUsageEntry = typeof DiskUsageEntry.Type;
+
+export const DiskUsageSnapshot = Schema.Struct({
+  sampledAt: NonNegativeInt,
+  /** The volume holding the T3 home directory. */
+  volume: Schema.NullOr(
+    Schema.Struct({ totalBytes: NonNegativeInt, availableBytes: NonNegativeInt }),
+  ),
+  /** Allocated size of T3's own data. It is a background scan, so it may lag the volume. */
+  breakdown: Schema.Struct({
+    status: Schema.Literals(["scanning", "ready", "failed", "unavailable"]),
+    /** When the entries below were measured; null before the first scan completes. */
+    scannedAt: Schema.NullOr(NonNegativeInt),
+    totalBytes: NonNegativeInt,
+    /** Largest first. */
+    entries: Schema.Array(DiskUsageEntry),
+    /** Entries beyond the cap, folded into one total. */
+    omittedEntries: NonNegativeInt,
+    omittedBytes: NonNegativeInt,
+  }),
+});
+export type DiskUsageSnapshot = typeof DiskUsageSnapshot.Type;
+
 export const ResourceTelemetryIoSemantics = Schema.Literals([
   "storage",
   "logical",
@@ -141,6 +193,15 @@ export const ResourceMonitorReadHistoryCommand = Schema.Struct({
 });
 export type ResourceMonitorReadHistoryCommand = typeof ResourceMonitorReadHistoryCommand.Type;
 
+export const ResourceMonitorScanDiskCommand = Schema.Struct({
+  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
+  type: Schema.Literal("scanDisk"),
+  requestId: TrimmedNonEmptyString,
+  root: Schema.String,
+  depth: PositiveInt,
+});
+export type ResourceMonitorScanDiskCommand = typeof ResourceMonitorScanDiskCommand.Type;
+
 export const ResourceMonitorShutdownCommand = Schema.Struct({
   version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
   type: Schema.Literal("shutdown"),
@@ -155,6 +216,7 @@ export const ResourceMonitorCommand = Schema.Union([
   ResourceMonitorSampleNowCommand,
   ResourceMonitorProcessTableCommand,
   ResourceMonitorReadHistoryCommand,
+  ResourceMonitorScanDiskCommand,
   ResourceMonitorShutdownCommand,
 ]);
 export type ResourceMonitorCommand = typeof ResourceMonitorCommand.Type;
@@ -209,6 +271,17 @@ export const ResourceMonitorHistoryChunkEvent = Schema.Struct({
 });
 export type ResourceMonitorHistoryChunkEvent = typeof ResourceMonitorHistoryChunkEvent.Type;
 
+export const ResourceMonitorDiskScanEvent = Schema.Struct({
+  version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
+  type: Schema.Literal("diskScan"),
+  requestId: TrimmedNonEmptyString,
+  totalBytes: NonNegativeInt,
+  /** Allocated bytes per path relative to the scanned root. */
+  entries: Schema.Array(Schema.Struct({ path: Schema.String, bytes: NonNegativeInt })),
+  error: Schema.NullOr(Schema.String),
+});
+export type ResourceMonitorDiskScanEvent = typeof ResourceMonitorDiskScanEvent.Type;
+
 export const ResourceMonitorErrorEvent = Schema.Struct({
   version: Schema.Literal(RESOURCE_MONITOR_PROTOCOL_VERSION),
   type: Schema.Literal("error"),
@@ -223,6 +296,7 @@ export const ResourceMonitorEvent = Schema.Union([
   ResourceMonitorSnapshotEvent,
   ResourceMonitorProcessTableEvent,
   ResourceMonitorHistoryChunkEvent,
+  ResourceMonitorDiskScanEvent,
   ResourceMonitorErrorEvent,
 ]);
 export type ResourceMonitorEvent = typeof ResourceMonitorEvent.Type;
