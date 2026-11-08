@@ -63,7 +63,8 @@ path itself: matching mount points would report macOS's sealed system volume, be
 firmlinks hide the data volume from the path. The per-location breakdown walks the whole
 tree, so it runs in the native monitor
 ([`disk.rs`](../../native/resource-monitor/src/disk.rs)) through `scanDisk`, outside the
-server's shared libuv thread pool. Without the monitor, the card shows free space and says
+server's shared libuv thread pool. It also scans configured and previous worktree folders
+outside the T3 home, since worktrees are usually the largest T3 data. Without the monitor, the card shows free space and says
 the breakdown is unavailable.
 
 The scan runs on its own thread, so process sampling never waits for it. That thread holds

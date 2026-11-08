@@ -13,3 +13,10 @@ export function diskUsageTone(fraction: number): "default" | "warning" | "danger
   if (fraction >= WARNING_FRACTION) return "warning";
   return "default";
 }
+
+/** Share of T3's data, with one decimal below 10% so small entries do not all read "0%". */
+export function diskUsageShare(bytes: number, totalBytes: number): string {
+  if (totalBytes <= 0) return "0%";
+  const percent = (bytes / totalBytes) * 100;
+  return percent >= 10 ? `${Math.round(percent)}%` : `${percent.toFixed(1)}%`;
+}

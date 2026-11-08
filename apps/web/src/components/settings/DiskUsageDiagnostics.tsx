@@ -14,15 +14,15 @@ import {
   StatBlock,
   StatsGrid,
 } from "./diagnosticsLayout";
-import { diskUsageTone, diskUsedFraction } from "./DiskUsageDiagnostics.logic";
+import { diskUsageShare, diskUsageTone, diskUsedFraction } from "./DiskUsageDiagnostics.logic";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsSection } from "./settingsLayout";
 
-const KIND_LABELS: Record<DiskUsageEntryKind, string> = {
+const KIND_LABELS: Record<Exclude<DiskUsageEntryKind, "worktree">, string> = {
   attachments: "Attachments",
   database: "Database",
   logs: "Logs",
   caches: "Caches",
-  worktree: "Worktree",
   other: "Other T3 data",
 };
 
@@ -71,7 +71,7 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
         <StatBlock
           label="T3 Data"
           value={breakdown && scannedAt !== null ? formatBytes(breakdown.totalBytes) : "..."}
-          tooltip="Allocated size of the T3 home directory, measured by a background scan."
+          tooltip="Allocated size of the T3 home directory and any worktree folder outside it, measured by a background scan. Each row's share is of this total."
         />
       </StatsGrid>
       {breakdown?.status === "failed" || query.error ? (
@@ -83,15 +83,31 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
       <div className="border-t border-border/60">
         {breakdown && scannedAt !== null ? (
           <DiagnosticsTable
-            headers={["Location", "Path", "Size"]}
-            columnWidths={["w-[30%]", "w-[50%]", "w-[20%]"]}
+            headers={["Location", "Path", "Share", "Size"]}
+            columnWidths={["w-[22%]", "w-[50%]", "w-[12%]", "w-[16%]"]}
             minTableWidth="min-w-[480px]"
           >
             {breakdown.entries.map((entry) => (
               <tr key={`${entry.kind}:${entry.path}`} className="hover:bg-muted/20">
-                <td className="px-4 py-2 sm:pl-5">{KIND_LABELS[entry.kind]}</td>
-                <td className="truncate px-4 py-2 text-muted-foreground">
-                  {entry.kind === "other" ? "" : entry.path}
+                <td className="truncate px-4 py-2 sm:pl-5">
+                  {entry.kind === "worktree"
+                    ? entry.path.split(/[\\/]/).slice(-2).join("/")
+                    : KIND_LABELS[entry.kind]}
+                </td>
+                <td className="px-4 py-2 text-muted-foreground">
+                  {entry.kind === "other" ? null : (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={<span className="block truncate">{entry.path}</span>}
+                      />
+                      <TooltipPopup side="top" variant="code">
+                        {entry.path}
+                      </TooltipPopup>
+                    </Tooltip>
+                  )}
+                </td>
+                <td className="px-4 py-2 font-mono tabular-nums text-muted-foreground">
+                  {diskUsageShare(entry.bytes, breakdown.totalBytes)}
                 </td>
                 <td className="px-4 py-2 font-mono tabular-nums sm:pr-5">
                   {formatBytes(entry.bytes)}
@@ -102,6 +118,9 @@ export function DiskUsageDiagnostics({ environmentId }: { environmentId: Environ
               <tr className="text-muted-foreground">
                 <td className="px-4 py-2 sm:pl-5" colSpan={2}>
                   {breakdown.omittedEntries} smaller items
+                </td>
+                <td className="px-4 py-2 font-mono tabular-nums">
+                  {diskUsageShare(breakdown.omittedBytes, breakdown.totalBytes)}
                 </td>
                 <td className="px-4 py-2 font-mono tabular-nums sm:pr-5">
                   {formatBytes(breakdown.omittedBytes)}
