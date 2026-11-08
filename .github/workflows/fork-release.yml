@@ -223,6 +223,14 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
+      # History only, for the release notes.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .env.example
+
       - uses: actions/download-artifact@v8
         with:
           name: cli-linux-x64
@@ -233,13 +241,25 @@ jobs:
           name: desktop-mac-arm64-signed
           path: assets
 
+      # The notes list every commit since the previous fork release, upstream's and the
+      # fork's, oldest first as the app expects. deploy is rebuilt each time, so its own
+      # merge commits are left out; upstream PR numbers link to upstream.
       - name: Publish
+        env:
+          REF: ${{ needs.prepare.outputs.ref }}
         run: |
           set -euo pipefail
           (cd assets && sha256sum t3-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isLatest \
+            --jq '[.[] | select(.isLatest)][0].tagName // ""')"
+          if [[ -n "$previous" ]] && git fetch --quiet --filter=blob:none origin "refs/tags/${previous}:refs/tags/${previous}"; then
+            git log --reverse --no-merges --format='- %s' "${previous}..${REF}" |
+              sed -E 's|\(#([0-9]+)\)$|(pingdotgg/t3code#\1)|' > notes.md
+          fi
+          [[ -s notes.md ]] || echo "Fork build of deploy at $REF." > notes.md
+          cat notes.md
           gh release create "v$VERSION" assets/* --repo "$GITHUB_REPOSITORY" \
-            --target "${{ needs.prepare.outputs.ref }}" --title "$VERSION" --latest \
-            --notes "Fork build of deploy at ${{ needs.prepare.outputs.ref }}."
+            --target "$REF" --title "$VERSION" --latest --notes-file notes.md
 
       # Hosts only ever move forward, so older fork releases are not needed.
       - name: Remove older fork releases
