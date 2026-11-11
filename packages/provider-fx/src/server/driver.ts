@@ -152,6 +152,10 @@ export const FxDriver: ProviderDriver<FxSettings, FxDriverEnv> = {
       displayName,
       accentColor,
       enabled,
+      // fx keeps its state under HOME and reads nothing without one.
+      dataDirectories: Effect.succeed(
+        processEnv.HOME?.trim() ? [path.join(processEnv.HOME.trim(), ".fx")] : [],
+      ),
       snapshot,
       snapshotForCwd: (cwd) =>
         !effectiveConfig.enabled

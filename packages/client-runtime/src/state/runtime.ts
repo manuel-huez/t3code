@@ -102,6 +102,8 @@ interface EnvironmentQueryAtomOptions<Input, A, E, R> extends Omit<
     readonly input: Input;
   }) => Atom.Atom<unknown> | undefined;
   readonly isFinal?: (value: A) => boolean;
+  /** A failed request also ends polling, as for a request an older server never answers. */
+  readonly stopOnFailure?: boolean;
   /**
    * Runs where each server answer lands, before readers see it, so derived records (summaries,
    * snapshots, watches) come from the producer instead of from components watching the data.
@@ -122,6 +124,8 @@ interface EnvironmentSubscriptionAtomOptions<Input, A, E, R> {
   readonly subscribe: (input: Input) => Stream.Stream<A, E, R>;
   readonly completeWhen?: (value: A) => boolean;
   readonly idleTtlMs?: number;
+  /** Keeps a completed value this long after its last reader leaves, so reopening skips a resubscribe. */
+  readonly completedTtlMs?: number;
 }
 
 export type SettledAsyncResult<A, E> = AsyncResult.Success<A, E> | AsyncResult.Failure<A, E>;
@@ -802,7 +806,8 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
         Atom.setIdleTTL(idleTtlMs),
       );
     const isFinal = (result: AsyncResult.AsyncResult<A, unknown>) =>
-      options.isFinal !== undefined && Option.exists(AsyncResult.value(result), options.isFinal);
+      (options.stopOnFailure === true && AsyncResult.isFailure(result)) ||
+      (options.isFinal !== undefined && Option.exists(AsyncResult.value(result), options.isFinal));
     const intervalQuery =
       options.refreshIntervalMs === undefined
         ? queryAtom
@@ -826,7 +831,12 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
     EnvironmentSupervisor.EnvironmentSupervisor | R
   >,
 ) {
-  const family = Atom.family((key: string) => {
+  const idleTtlMs = options.idleTtlMs ?? 5 * 60_000;
+  const label = (key: string) =>
+    options.sensitiveInput
+      ? `${options.label}:${parseEnvironmentRpcKey<Input>(key).environmentId}`
+      : `${options.label}:${key}`;
+  const live = Atom.family((key: string) => {
     const target = parseEnvironmentRpcKey<Input>(key);
     return runtime
       .atom(
@@ -834,15 +844,31 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
           followStreamInEnvironment(target.environmentId, options.subscribe(target.input)),
         ).pipe(options.completeWhen ? Stream.takeUntil(options.completeWhen) : (stream) => stream),
       )
-      .pipe(
-        Atom.setIdleTTL(options.idleTtlMs ?? 5 * 60_000),
-        Atom.withLabel(
-          options.sensitiveInput
-            ? `${options.label}:${target.environmentId}`
-            : `${options.label}:${key}`,
-        ),
-      );
+      .pipe(Atom.setIdleTTL(idleTtlMs), Atom.withLabel(label(key)));
   });
+  const { completeWhen, completedTtlMs } = options;
+  if (completeWhen === undefined || completedTtlMs === undefined) {
+    return (target: { readonly environmentId: EnvironmentIdType; readonly input: Input }) =>
+      live(environmentRpcKey(target));
+  }
+  const completed = Atom.family((key: string) =>
+    Atom.make(Option.none<A>()).pipe(
+      Atom.setIdleTTL(completedTtlMs),
+      Atom.withLabel(`${label(key)}:completed`),
+    ),
+  );
+  // Reading `completed` first drops the live subscription once its value is final.
+  const family = Atom.family((key: string) =>
+    Atom.make((get) => {
+      const done = get(completed(key));
+      if (Option.isSome(done)) return AsyncResult.success(done.value);
+      const result = get(live(key));
+      if (AsyncResult.isSuccess(result) && !result.waiting && completeWhen(result.value)) {
+        get.set(completed(key), Option.some(result.value));
+      }
+      return result;
+    }).pipe(Atom.setIdleTTL(idleTtlMs), Atom.withLabel(label(key))),
+  );
   return (target: { readonly environmentId: EnvironmentIdType; readonly input: Input }) =>
     family(environmentRpcKey(target));
 }
@@ -895,6 +921,7 @@ export function createEnvironmentRpcQueryAtomFamily<
       readonly input: EnvironmentRpcInput<TTag>;
     }) => Atom.Atom<unknown> | undefined;
     readonly isFinal?: (value: EnvironmentRpcSuccess<TTag>) => boolean;
+    readonly stopOnFailure?: boolean;
     readonly onAnswer?: QueryAnswerHandler<EnvironmentRpcInput<TTag>, EnvironmentRpcSuccess<TTag>>;
   },
 ) {
@@ -908,6 +935,7 @@ export function createEnvironmentRpcQueryAtomFamily<
       : { refreshIntervalMs: options.refreshIntervalMs }),
     ...(options.refreshTrigger === undefined ? {} : { refreshTrigger: options.refreshTrigger }),
     ...(options.isFinal === undefined ? {} : { isFinal: options.isFinal }),
+    ...(options.stopOnFailure === undefined ? {} : { stopOnFailure: options.stopOnFailure }),
     ...(options.onAnswer === undefined ? {} : { onAnswer: options.onAnswer }),
     execute: (
       input: EnvironmentRpcInput<TTag>,
@@ -929,6 +957,7 @@ export function createEnvironmentRpcSubscriptionAtomFamily<
     readonly tag: TTag;
     readonly idleTtlMs?: number;
     readonly completeWhen?: (value: B) => boolean;
+    readonly completedTtlMs?: number;
     readonly transform?: (
       stream: Stream.Stream<
         EnvironmentRpcStreamValue<TTag>,
@@ -945,6 +974,7 @@ export function createEnvironmentRpcSubscriptionAtomFamily<
   return createEnvironmentSubscriptionAtomFamily(runtime, {
     label: options.label,
     ...(options.completeWhen === undefined ? {} : { completeWhen: options.completeWhen }),
+    ...(options.completedTtlMs === undefined ? {} : { completedTtlMs: options.completedTtlMs }),
     ...(options.idleTtlMs === undefined ? {} : { idleTtlMs: options.idleTtlMs }),
     subscribe: (input: EnvironmentRpcInput<TTag>) => {
       const stream = subscribe(options.tag, input);

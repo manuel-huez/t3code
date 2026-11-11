@@ -10,7 +10,8 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { piUsageReader } from "./usage.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { piUsageReader, resolvePiAgentDir, resolvePiSessionsDir } from "./usage.ts";
 import { makePiTextGeneration } from "./textGeneration.ts";
 import { PiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
@@ -45,6 +46,7 @@ const DRIVER_KIND = ProviderDriverKind.make("pi");
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@earendil-works/pi-coding-agent",
+  mise: { tool: "pi" },
   nativeUpdate: { args: ["update", "--self"] },
 });
 
@@ -186,6 +188,12 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
       displayName,
       accentColor,
       enabled,
+      dataDirectories: HostProcess.HomeDirectory.pipe(
+        Effect.map((home) => [
+          resolvePiAgentDir(processEnv, home, pathService),
+          resolvePiSessionsDir(processEnv, home, pathService),
+        ]),
+      ),
       snapshot,
       snapshotForCwd: (workspaceCwd) =>
         !effectiveConfig.enabled

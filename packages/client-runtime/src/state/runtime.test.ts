@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   ORCHESTRATION_V2_WS_METHODS,
   ThreadId,
+  ProjectId,
   type ReviewDiffPreviewInput,
   type PreviewEvent,
   type TerminalAttachInput,
@@ -102,11 +103,13 @@ const makeEnvironmentQueryHarness = Effect.fn("TestEnvironmentQuery.makeHarness"
     initialState,
     rpcSession,
     isFinal,
+    stopOnFailure,
     onAnswer,
   }: {
     readonly refreshTrigger?: Atom.Atom<unknown>;
     readonly onAnswer?: QueryAnswerHandler<undefined, A>;
     readonly isFinal?: (value: A) => boolean;
+    readonly stopOnFailure?: boolean;
     readonly idleTtlMs?: number;
     readonly persistence?: QueryPersistence<A>;
     readonly initialState?: SupervisorConnectionState;
@@ -154,6 +157,7 @@ const makeEnvironmentQueryHarness = Effect.fn("TestEnvironmentQuery.makeHarness"
     ...(refreshTrigger === undefined ? {} : { refreshTrigger: () => refreshTrigger }),
     ...(idleTtlMs === undefined ? {} : { idleTtlMs }),
     ...(isFinal === undefined ? {} : { isFinal }),
+    ...(stopOnFailure === undefined ? {} : { stopOnFailure }),
     ...(onAnswer === undefined ? {} : { onAnswer }),
   });
 
@@ -390,6 +394,63 @@ describe("finite environment subscription lifecycle", () => {
           expect(observed.some((result) => AsyncResult.isFailure(result))).toBe(false);
         }),
       ),
+  );
+  it.effect.each([
+    { completedTtlMs: undefined, subscriptions: 2 },
+    { completedTtlMs: 60_000, subscriptions: 1 },
+  ])(
+    "reopening a completed subscription subscribes $subscriptions time(s) with completedTtlMs $completedTtlMs",
+    ({ completedTtlMs, subscriptions }) =>
+      Effect.gen(function* () {
+        let subscribed = 0;
+        const environmentRegistry = EnvironmentRegistry.EnvironmentRegistry.of({
+          followStream: (_environmentId: EnvironmentId, source: Stream.Stream<unknown>) => source,
+        } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]);
+        const runtime = Atom.runtime(
+          Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, environmentRegistry),
+        );
+        const family = createEnvironmentSubscriptionAtomFamily(runtime, {
+          label: "test.completed-subscription",
+          subscribe: () =>
+            Stream.suspend(() => {
+              subscribed += 1;
+              return Stream.make({ complete: false }, { complete: true });
+            }),
+          completeWhen: (value) => value.complete,
+          idleTtlMs: 0,
+          ...(completedTtlMs === undefined ? {} : { completedTtlMs }),
+        });
+        const atom = family({ environmentId: QUERY_ENVIRONMENT.environmentId, input: undefined });
+        // Flushed after each close: idle removals have run by the time a user reopens a row.
+        const scheduled: Array<() => void> = [];
+        const registry = AtomRegistry.make({
+          scheduleTask: (task) => {
+            scheduled.push(task);
+            return () => undefined;
+          },
+        });
+        const open = Effect.gen(function* () {
+          const settled = yield* Deferred.make<boolean>();
+          const unsubscribe = registry.subscribe(
+            atom,
+            (result) => {
+              if (AsyncResult.isSuccess(result) && !result.waiting) {
+                Deferred.doneUnsafe(settled, Exit.succeed(result.value.complete));
+              }
+            },
+            { immediate: true },
+          );
+          const complete = yield* Deferred.await(settled);
+          unsubscribe();
+          for (const task of scheduled.splice(0)) task();
+          return complete;
+        });
+
+        expect(yield* open).toBe(true);
+        expect(yield* open).toBe(true);
+        expect(subscribed).toBe(subscriptions);
+        registry.dispose();
+      }),
   );
 });
 
@@ -1019,6 +1080,69 @@ describe("environment query lifecycle", () => {
         expect(executions).toBe(2);
 
         expect(yield* read).toBe(3);
+      }),
+    ),
+  );
+
+  it.effect.each([true, false])("loads thread link metadata with server support %s", (supported) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const projectId = ProjectId.make("project");
+        const tag = supported
+          ? ORCHESTRATION_V2_WS_METHODS.getThreadLinkMetadata
+          : ORCHESTRATION_V2_WS_METHODS.getThreadTitles;
+        const harness = yield* makeEnvironmentQueryHarness(Effect.void, {
+          rpcSession: {
+            initialConfig: Effect.succeed({ threadLinkMetadata: supported }),
+            client: {
+              [tag]: () =>
+                Effect.succeed(
+                  supported ? { fork: { title: "Fork", projectId } } : { fork: "Fork" },
+                ),
+            },
+          } as unknown as RpcSession.RpcSession,
+        });
+        const runtime = harness.runtime as unknown as Atom.AtomRuntime<
+          EnvironmentRegistry.EnvironmentRegistry | HttpClient.HttpClient
+        >;
+        const atom = createOrchestrationEnvironmentAtoms(runtime).threadLinkMetadata({
+          environmentId: QUERY_ENVIRONMENT.environmentId,
+          input: { threadIds: [ThreadId.make("fork")] },
+        });
+        const registry = yield* mountEnvironmentQuery(atom);
+        expect(yield* readEnvironmentQuery(registry, atom)).toEqual({
+          fork: { title: "Fork", projectId: supported ? projectId : null },
+        });
+      }),
+    ),
+  );
+
+  it.effect("stops refreshing after a failure when told to, until refreshed by hand", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let executions = 0;
+        const trigger = Atom.make(0).pipe(Atom.keepAlive);
+        const harness = yield* makeEnvironmentQueryHarness(
+          Effect.suspend(() => {
+            executions += 1;
+            return Effect.fail("unknown method");
+          }),
+          { refreshTrigger: trigger, stopOnFailure: true },
+        );
+        const registry = AtomRegistry.make();
+        yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
+        const settle = Effect.exit(
+          AtomRegistry.getResult(registry, harness.atom, { suspendOnWaiting: true }),
+        );
+        const unmount = registry.mount(harness.atom);
+        yield* settle;
+        registry.set(trigger, 1);
+        expect(executions).toBe(1);
+
+        registry.refresh(harness.atom);
+        yield* settle;
+        expect(executions).toBe(2);
+        unmount();
       }),
     ),
   );
