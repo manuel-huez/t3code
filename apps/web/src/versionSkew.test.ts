@@ -72,13 +72,17 @@ describe("versionSkew", () => {
     expect(resolveVersionMismatch("0.0.34")).toBeNull();
   });
 
-  it.each(["0.0.34-nightly.20260823.1124", "0.0.34-nightly.20260824.1124"])(
-    "warns when nightly server %s is behind a nightly client on the same release",
-    (serverVersion) => {
-      branding.APP_VERSION = "0.0.34-nightly.20260824.1125";
+  it.each([
+    ["0.0.34-nightly.20260823.1124", "0.0.34-nightly.20260824.1125"],
+    ["0.0.34-nightly.20260824.1124", "0.0.34-nightly.20260824.1125"],
+    ["0.0.34-fork.20260823.3", "0.0.34-fork.20260824.4"],
+  ])(
+    "warns when server %s is behind client %s on the same release",
+    (serverVersion, clientVersion) => {
+      branding.APP_VERSION = clientVersion;
 
       expect(resolveVersionMismatch(serverVersion)).toEqual({
-        clientVersion: "0.0.34-nightly.20260824.1125",
+        clientVersion,
         serverVersion,
         hint: MISMATCH_HINT,
       });
