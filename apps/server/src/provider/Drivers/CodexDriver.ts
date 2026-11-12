@@ -391,6 +391,11 @@ export const CodexDriver: ProviderDriver<
       displayName,
       accentColor,
       enabled,
+      dataDirectories: Effect.succeed(
+        [...new Set([homeLayout.sharedHomePath, homeLayout.effectiveHomePath ?? ""])].filter(
+          Boolean,
+        ),
+      ),
       snapshot,
       snapshotForCwd,
       consumeResetCredit,
