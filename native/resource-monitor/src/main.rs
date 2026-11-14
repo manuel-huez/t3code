@@ -1,7 +1,12 @@
+mod disk;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufWriter, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{
@@ -76,6 +81,12 @@ enum Command {
         request_id: String,
         window_ms: u64,
     },
+    ScanDisk {
+        version: u32,
+        request_id: String,
+        root: String,
+        depth: usize,
+    },
     Shutdown {
         version: u32,
     },
@@ -91,6 +102,7 @@ impl Command {
             | Self::SampleNow { version, .. }
             | Self::ProcessTable { version, .. }
             | Self::ReadHistory { version, .. }
+            | Self::ScanDisk { version, .. }
             | Self::Shutdown { version } => *version,
         }
     }
@@ -99,6 +111,73 @@ impl Command {
 enum Input {
     Command(Command),
     Invalid(String),
+    /// A finished disk scan, sent from the walker's own thread so sampling never waits on it.
+    DiskScan(DiskScanEvent),
+    /// The server closed stdin. Scan threads hold input senders, so the channel alone never
+    /// reports this.
+    StdinClosed,
+}
+
+#[derive(Debug, Serialize)]
+struct DiskEntry {
+    path: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskScanEvent {
+    version: u32,
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    request_id: String,
+    total_bytes: u64,
+    entries: Vec<DiskEntry>,
+    error: Option<String>,
+}
+
+impl DiskScanEvent {
+    fn new(request_id: String, result: io::Result<disk::ScanResult>) -> Self {
+        let (total_bytes, entries, error) = match result {
+            Ok(scan) => (
+                scan.total_bytes,
+                scan.entries
+                    .into_iter()
+                    .map(|(path, bytes)| DiskEntry { path, bytes })
+                    .collect(),
+                None,
+            ),
+            Err(error) => (0, Vec::new(), Some(error.to_string())),
+        };
+        Self {
+            version: PROTOCOL_VERSION,
+            event_type: "diskScan",
+            request_id,
+            total_bytes,
+            entries,
+            error,
+        }
+    }
+}
+
+fn start_disk_scan(
+    request_id: String,
+    root: String,
+    depth: usize,
+    scanning: &Arc<AtomicBool>,
+    sender: SyncSender<Input>,
+) {
+    if scanning.swap(true, Ordering::AcqRel) {
+        let busy = io::Error::new(io::ErrorKind::WouldBlock, "a disk scan is already running");
+        let _ = sender.send(Input::DiskScan(DiskScanEvent::new(request_id, Err(busy))));
+        return;
+    }
+    let scanning = Arc::clone(scanning);
+    thread::spawn(move || {
+        let result = disk::scan(Path::new(&root), depth);
+        scanning.store(false, Ordering::Release);
+        let _ = sender.send(Input::DiskScan(DiskScanEvent::new(request_id, result)));
+    });
 }
 
 #[derive(Debug, Serialize)]
@@ -724,9 +803,13 @@ fn clamp_sample_interval(sample_interval_ms: u64) -> Option<Duration> {
     })
 }
 
-fn spawn_input_reader() -> Receiver<Input> {
+fn spawn_input_reader() -> (SyncSender<Input>, Receiver<Input>) {
     let (sender, receiver) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+    let reader_sender = sender.clone();
     thread::spawn(move || {
+        let sender = reader_sender;
+        // Whatever ends this loop, main must exit; the scan threads' senders keep the channel open.
+        let _closed = StdinClosedOnDrop(sender.clone());
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
             let line = match line {
@@ -758,7 +841,15 @@ fn spawn_input_reader() -> Receiver<Input> {
             }
         }
     });
-    receiver
+    (sender, receiver)
+}
+
+struct StdinClosedOnDrop(SyncSender<Input>);
+
+impl Drop for StdinClosedOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(Input::StdinClosed);
+    }
 }
 
 fn sample_now_deadline(
@@ -850,7 +941,8 @@ fn main() -> io::Result<()> {
         },
     )?;
 
-    let receiver = spawn_input_reader();
+    let (sender, receiver) = spawn_input_reader();
+    let disk_scanning = Arc::new(AtomicBool::new(false));
     let mut collector = Collector::new();
     let mut history = HistoryRecorder::default();
     let mut config: Option<CollectorConfig> = None;
@@ -884,6 +976,10 @@ fn main() -> io::Result<()> {
             Ok(Input::Invalid(message)) => {
                 write_error(&mut writer, "invalid-command", message, true)?;
             }
+            Ok(Input::DiskScan(event)) => {
+                write_event(&mut writer, &event)?;
+            }
+            Ok(Input::StdinClosed) => return Ok(()),
             Ok(Input::Command(command)) => {
                 if command.version() != PROTOCOL_VERSION {
                     write_error(
@@ -997,6 +1093,12 @@ fn main() -> io::Result<()> {
                             )?;
                         }
                     }
+                    Command::ScanDisk {
+                        request_id,
+                        root,
+                        depth,
+                        ..
+                    } => start_disk_scan(request_id, root, depth, &disk_scanning, sender.clone()),
                     Command::Shutdown { .. } => return Ok(()),
                 }
             }

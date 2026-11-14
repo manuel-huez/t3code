@@ -22,6 +22,7 @@ import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as sdk from "./sdk.ts";
 import { MuseDriver } from "./driver.ts";
+import * as MuseUsageHome from "./MuseUsageHome.ts";
 
 vi.mock("./sdk.ts", { spy: true });
 
@@ -29,6 +30,7 @@ const layerTest = TestProviderHost.layer({
   runBackgroundWork: false,
   settings: { ...DEFAULT_SERVER_SETTINGS, enableProviderUpdateChecks: false },
 }).pipe(
+  Layer.provideMerge(MuseUsageHome.layer),
   Layer.provideMerge(NodeServices.layer),
   Layer.provideMerge(IdAllocator.layer),
   Layer.provideMerge(McpProviderSessions.layer),
