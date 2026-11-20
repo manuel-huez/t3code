@@ -64,6 +64,7 @@ import {
   shouldShowResourceMonitorRetry,
   visibleResourceTelemetryProcesses,
 } from "./ResourceTelemetryDiagnostics.logic";
+import { DiskUsageDiagnostics } from "./DiskUsageDiagnostics";
 import { SettingsSection } from "./settingsLayout";
 
 const HISTORY_WINDOWS = [
@@ -1220,6 +1221,8 @@ function ResourceTelemetryDiagnosticsBody({
           ) : null}
         </div>
       </SettingsSection>
+
+      <DiskUsageDiagnostics environmentId={environmentId} />
 
       <SettingsSection
         title={gt("Host & collection")}
