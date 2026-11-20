@@ -1,0 +1,272 @@
+name: Fork release
+
+# Builds this fork's deploy branch (upstream main plus the owner's branches) and
+# publishes it as the fork's latest GitHub release: the macOS arm64 app, which
+# updates itself from these releases, and the Linux x64 CLI archive, which
+# servers install with T3CODE_RELEASE_BASE_URL pointing here.
+#
+# The app is signed with the owner's own certificate, not a Developer ID: macOS
+# accepts an update signed by the same certificate, but Gatekeeper does not
+# trust it for apps downloaded in a browser. Install it with a tool that does
+# not quarantine downloads, such as curl or Ansible.
+
+on:
+  push:
+    branches: [deploy]
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      ref: ${{ steps.meta.outputs.ref }}
+      clerk_publishable_key: ${{ steps.meta.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.meta.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.meta.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ steps.meta.outputs.relay_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            apps/server/package.json
+            .env.example
+          sparse-checkout-cone-mode: false
+
+      # The next patch release with a fork suffix: above the upstream release it
+      # builds on, so a stable install updates to it, and ordered by date and run.
+      # .env.example holds the production T3 Connect values the official builds use.
+      - id: meta
+        run: |
+          set -euo pipefail
+          base="$(jq -r .version apps/server/package.json)"
+          IFS=. read -r major minor patch <<<"${base%%-*}"
+          env_example() { sed -n "s|^T3CODE_$1=||p" .env.example; }
+          {
+            echo "version=$major.$minor.$((patch + 1))-fork.$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER"
+            echo "ref=$GITHUB_SHA"
+            echo "clerk_publishable_key=$(env_example CLERK_PUBLISHABLE_KEY)"
+            echo "clerk_jwt_template=$(env_example CLERK_JWT_TEMPLATE)"
+            echo "clerk_cli_oauth_client_id=$(env_example CLERK_CLI_OAUTH_CLIENT_ID)"
+            echo "relay_url=$(env_example RELAY_URL)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  build_bundle:
+    name: Build JS bundle
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.prepare.outputs.clerk_publishable_key }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.prepare.outputs.clerk_jwt_template }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.prepare.outputs.clerk_cli_oauth_client_id }}
+      T3CODE_RELAY_URL: ${{ needs.prepare.outputs.relay_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - run: node scripts/update-release-package-versions.ts "${{ needs.prepare.outputs.version }}"
+
+      - run: vp run build:desktop:bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop_mac_arm64:
+    name: Desktop macOS arm64
+    needs: [prepare, build_bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      ref: ${{ needs.prepare.outputs.ref }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.prepare.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.prepare.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.prepare.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.prepare.outputs.relay_url }}
+      label: macOS arm64
+      runner: macos-15
+      platform: mac
+      target: dmg
+      arch: arm64
+      rust_target: aarch64-apple-darwin
+      resource_key: darwin-arm64
+
+  desktop_linux_x64:
+    name: Desktop Linux x64
+    needs: [prepare, build_bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      ref: ${{ needs.prepare.outputs.ref }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.prepare.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.prepare.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.prepare.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.prepare.outputs.relay_url }}
+      label: Linux x64
+      runner: ubuntu-24.04
+      platform: linux
+      target: AppImage
+      arch: x64
+      rust_target: x86_64-unknown-linux-gnu
+      resource_key: linux-x64
+      cli_archive: true
+
+  sign_mac:
+    name: Sign macOS app
+    needs: [prepare, desktop_mac_arm64]
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-mac-arm64
+          path: unsigned
+
+      # Squirrel.Mac installs an update only when it meets the running app's
+      # signing requirement, which names this certificate. Re-signing changes the
+      # zip, so the update manifest is rewritten and the stale blockmaps dropped.
+      - name: Sign the app and rewrite its update manifest
+        env:
+          CERTIFICATE_P12: ${{ secrets.FORK_MAC_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.FORK_MAC_CERTIFICATE_PASSWORD }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/fork-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          trap 'security delete-keychain "$keychain" 2>/dev/null || true' EXIT
+          printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/wwdr.cer" https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/wwdr.cer" -k "$keychain"
+          rm "$RUNNER_TEMP/signing.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -nE 's/.*"(Apple Development: [^"]+)".*/\1/p' | head -n 1)"
+          [[ -n "$identity" ]] || { echo "No Apple Development identity in FORK_MAC_CERTIFICATE_P12." >&2; exit 1; }
+
+          zip_path="$(ls unsigned/*.zip)"
+          zip_name="$(basename "$zip_path")"
+          mkdir app publish
+          ditto -x -k "$zip_path" app
+          bundle="$(ls -d app/*.app)"
+          codesign --force --deep --timestamp=none --preserve-metadata=entitlements \
+            --keychain "$keychain" --sign "$identity" "$bundle"
+          codesign --verify --deep --strict "$bundle"
+          codesign --display --requirements - "$bundle"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "publish/$zip_name"
+
+          sha512="$(openssl dgst -sha512 -binary "publish/$zip_name" | base64)"
+          size="$(stat -f %z "publish/$zip_name")"
+          cat > publish/latest-mac.yml <<EOF
+          version: $VERSION
+          files:
+            - url: $zip_name
+              sha512: $sha512
+              size: $size
+          path: $zip_name
+          sha512: $sha512
+          releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'
+          EOF
+          cat publish/latest-mac.yml
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-mac-arm64-signed
+          path: publish/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    needs: [prepare, desktop_linux_x64, sign_mac]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      # History only, for the release notes.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .env.example
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: cli-linux-x64
+          path: assets
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-mac-arm64-signed
+          path: assets
+
+      # The notes list every commit since the previous fork release, upstream's and the
+      # fork's, oldest first as the app expects. deploy is rebuilt each time, so its own
+      # merge commits are left out; upstream PR numbers link to upstream.
+      - name: Publish
+        env:
+          REF: ${{ needs.prepare.outputs.ref }}
+        run: |
+          set -euo pipefail
+          (cd assets && sha256sum t3-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isLatest \
+            --jq '[.[] | select(.isLatest)][0].tagName // ""')"
+          if [[ -n "$previous" ]] && git fetch --quiet --filter=blob:none origin "refs/tags/${previous}:refs/tags/${previous}"; then
+            git log --reverse --no-merges --format='- %s' "${previous}..${REF}" |
+              sed -E 's|\(#([0-9]+)\)$|(pingdotgg/t3code#\1)|' > notes.md
+          fi
+          [[ -s notes.md ]] || echo "Fork build of deploy at $REF." > notes.md
+          cat notes.md
+          gh release create "v$VERSION" assets/* --repo "$GITHUB_REPOSITORY" \
+            --target "$REF" --title "$VERSION" --latest --notes-file notes.md
+
+      # Hosts only ever move forward, so older fork releases are not needed.
+      - name: Remove older fork releases
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("-fork\\."))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+            while read -r tag; do
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+            done
