@@ -113,7 +113,7 @@ jobs:
       clerk_cli_oauth_client_id: ${{ needs.prepare.outputs.clerk_cli_oauth_client_id }}
       relay_url: ${{ needs.prepare.outputs.relay_url }}
       label: macOS arm64
-      runner: macos-15
+      runner: macos-26
       platform: mac
       target: dmg
       arch: arm64
