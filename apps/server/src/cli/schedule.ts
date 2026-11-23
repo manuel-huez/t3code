@@ -3,20 +3,16 @@ import {
   OrchestratorMcpFailure,
   OrchestratorMcpListScheduledTasksResult,
   OrchestratorMcpScheduleTaskResult,
-  ProjectId,
   ScheduledTaskId,
   TrimmedNonEmptyString,
+  type AuthMcpClientAccess,
   type OrchestratorMcpScheduledTask,
 } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as References from "effect/References";
-import * as Runtime from "effect/Runtime";
 import * as Schema from "effect/Schema";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
@@ -25,66 +21,24 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
-import { expandHomePath } from "../os-jank.ts";
 import { readLiveServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
-
-class ScheduleServerNotRunningError extends Schema.TaggedError<ScheduleServerNotRunningError>()(
-  "ScheduleServerNotRunningError",
-  { baseDir: Schema.String },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return `No running T3 Code server uses ${this.baseDir}. Start T3 Code, then retry.`;
-  }
-}
-
-class ScheduleServerUnreachableError extends Schema.TaggedError<ScheduleServerUnreachableError>()(
-  "ScheduleServerUnreachableError",
-  { origin: Schema.String, cause: Schema.Defect() },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    const reason = this.cause instanceof Error ? ` ${this.cause.message}` : "";
-    return `Could not reach the T3 Code server at ${this.origin}.${reason}`;
-  }
-}
-
-class ScheduleToolFailedError extends Schema.TaggedError<ScheduleToolFailedError>()(
-  "ScheduleToolFailedError",
-  { tool: Schema.String, detail: Schema.String },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return this.detail;
-  }
-}
-
-class ScheduleUsageError extends Schema.TaggedError<ScheduleUsageError>()("ScheduleUsageError", {
-  detail: Schema.String,
-}) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return this.detail;
-  }
-}
-
-class ScheduleProjectNotFoundError extends Schema.TaggedError<ScheduleProjectNotFoundError>()(
-  "ScheduleProjectNotFoundError",
-  { identifier: Schema.String },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return `No T3 Code project matches '${this.identifier}'. Pass a project id or a path inside a project.`;
-  }
-}
+import {
+  resolveProject,
+  ThreadProjectNotFoundError,
+  ThreadServerNotRunningError,
+  ThreadServerUnreachableError,
+  ThreadToolFailedError,
+  ThreadUsageError,
+  type ThreadTools,
+} from "./thread.ts";
 
 const ScheduleCliError = Schema.Union([
-  ScheduleServerNotRunningError,
-  ScheduleServerUnreachableError,
-  ScheduleToolFailedError,
-  ScheduleUsageError,
-  ScheduleProjectNotFoundError,
+  ThreadServerNotRunningError,
+  ThreadServerUnreachableError,
+  ThreadToolFailedError,
+  ThreadUsageError,
+  ThreadProjectNotFoundError,
 ]);
 const isScheduleCliError = Schema.is(ScheduleCliError);
 
@@ -108,13 +62,6 @@ const ToolResult = Schema.Struct({
 });
 const decodeToolResult = Schema.decodeUnknownEffect(ToolResult);
 
-const ProjectListResult = Schema.Struct({
-  projects: Schema.Array(
-    Schema.Struct({ id: ProjectId, title: Schema.String, workspaceRoot: Schema.String }),
-  ),
-  nextCursor: Schema.NullOr(Schema.Int),
-});
-
 const toolFailureDetail = (result: typeof ToolResult.Type) => {
   const text = result.content?.find((part) => part.text !== undefined)?.text ?? "";
   return Option.match(decodeFailureText(text), {
@@ -123,9 +70,9 @@ const toolFailureDetail = (result: typeof ToolResult.Type) => {
   });
 };
 
-const makeScheduleTools = (session: McpToolSession, origin: string) => {
+const makeScheduleTools = (session: McpToolSession, origin: string): ThreadTools => {
   const unexpected = (tool: string) =>
-    new ScheduleToolFailedError({
+    new ThreadToolFailedError({
       tool,
       detail: `The server sent an unexpected ${tool} result. Update the t3 CLI to match the server.`,
     });
@@ -134,13 +81,13 @@ const makeScheduleTools = (session: McpToolSession, origin: string) => {
       tool: string,
       args: Readonly<Record<string, unknown>>,
       schema: S,
-    ): Effect.fn.Return<S["Type"], ScheduleServerUnreachableError | ScheduleToolFailedError> {
+    ): Effect.fn.Return<S["Type"], ThreadServerUnreachableError | ThreadToolFailedError> {
       const raw = yield* session
         .call(tool, args)
-        .pipe(Effect.mapError((cause) => new ScheduleServerUnreachableError({ origin, cause })));
+        .pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
       const result = yield* decodeToolResult(raw).pipe(Effect.mapError(() => unexpected(tool)));
       if (result.isError === true) {
-        return yield* new ScheduleToolFailedError({ tool, detail: toolFailureDetail(result) });
+        return yield* new ThreadToolFailedError({ tool, detail: toolFailureDetail(result) });
       }
       return yield* Schema.decodeUnknownEffect(schema)(result.structuredContent).pipe(
         Effect.mapError(() => unexpected(tool)),
@@ -148,11 +95,14 @@ const makeScheduleTools = (session: McpToolSession, origin: string) => {
     }),
   };
 };
-type ScheduleTools = ReturnType<typeof makeScheduleTools>;
 
 const withScheduleTools = Effect.fn("cli.schedule.withScheduleTools")(function* <A, E, R>(
-  flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
-  run: (tools: ScheduleTools) => Effect.Effect<A, E, R>,
+  flags: {
+    readonly baseDir: Option.Option<string>;
+    readonly json: boolean;
+    readonly access: AuthMcpClientAccess;
+  },
+  run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel, { quietLogs: flags.json });
@@ -160,14 +110,14 @@ const withScheduleTools = Effect.fn("cli.schedule.withScheduleTools")(function* 
   return yield* Effect.gen(function* () {
     const runtimeState = yield* readLiveServerRuntimeState(config.serverRuntimeStatePath);
     if (Option.isNone(runtimeState)) {
-      return yield* new ScheduleServerNotRunningError({ baseDir: config.baseDir });
+      return yield* new ThreadServerNotRunningError({ baseDir: config.baseDir });
     }
     const origin = runtimeState.value.origin;
     const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const issued = yield* Effect.acquireRelease(
       environmentAuth.issueMcpClientSession({
         label: "t3 schedule cli",
-        access: "full-access",
+        access: flags.access,
         peerLink: false,
         client: { deviceType: "bot" },
       }),
@@ -178,7 +128,7 @@ const withScheduleTools = Effect.fn("cli.schedule.withScheduleTools")(function* 
       endpoint: new URL("/mcp", origin).href,
       authorization: `Bearer ${issued.token}`,
       clientName: "t3-schedule-cli",
-    }).pipe(Effect.mapError((cause) => new ScheduleServerUnreachableError({ origin, cause })));
+    }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
     return yield* run(makeScheduleTools(session, origin));
   }).pipe(
     Effect.scoped,
@@ -192,50 +142,6 @@ const withScheduleTools = Effect.fn("cli.schedule.withScheduleTools")(function* 
   );
 });
 
-const listAllProjects = Effect.fn("cli.schedule.listAllProjects")(function* (tools: ScheduleTools) {
-  const projects: Array<(typeof ProjectListResult.Type)["projects"][number]> = [];
-  let cursor: number | null = 0;
-  while (cursor !== null) {
-    const page: typeof ProjectListResult.Type = yield* tools.call(
-      "t3_project_list",
-      { cursor, limit: 100 },
-      ProjectListResult,
-    );
-    projects.push(...page.projects);
-    cursor = page.nextCursor;
-  }
-  return projects;
-});
-
-const resolveProject = Effect.fn("cli.schedule.resolveProject")(function* (
-  tools: ScheduleTools,
-  identifier: string,
-) {
-  const projects = yield* listAllProjects(tools);
-  const byId = projects.find((project) => project.id === identifier);
-  if (byId !== undefined) return byId;
-
-  const path = yield* Path.Path;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const realPath = (value: string) =>
-    fileSystem.realPath(value).pipe(Effect.orElseSucceed(() => value));
-  const target = yield* realPath(
-    path.resolve(yield* HostProcess.WorkingDirectory, yield* expandHomePath(identifier)),
-  );
-  const roots = yield* Effect.forEach(projects, (project) =>
-    Effect.map(realPath(project.workspaceRoot), (root) => ({ project, root })),
-  );
-  const matching = roots
-    .filter(({ root }) => {
-      const relative = path.relative(root, target);
-      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-    })
-    .toSorted((left, right) => right.root.length - left.root.length);
-  const best = matching[0];
-  if (best !== undefined) return best.project;
-  return yield* new ScheduleProjectNotFoundError({ identifier });
-});
-
 const readPrompt = Effect.fn("cli.schedule.readPrompt")(function* (argument: string) {
   const text =
     argument === "-"
@@ -244,7 +150,7 @@ const readPrompt = Effect.fn("cli.schedule.readPrompt")(function* (argument: str
         )
       : argument;
   if (text.trim().length === 0) {
-    return yield* new ScheduleUsageError({ detail: "The prompt is empty." });
+    return yield* new ThreadUsageError({ detail: "The prompt is empty." });
   }
   return text;
 });
@@ -255,14 +161,14 @@ const parseWeekdays = Effect.fn("cli.schedule.parseWeekdays")(function* (raw: st
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
   if (parts.length === 0) {
-    return yield* new ScheduleUsageError({
+    return yield* new ThreadUsageError({
       detail: "--weekdays must list comma-separated digits from 0 (Sunday) to 6 (Saturday).",
     });
   }
   const days: Array<number> = [];
   for (const part of parts) {
     if (!/^[0-6]$/.test(part)) {
-      return yield* new ScheduleUsageError({
+      return yield* new ThreadUsageError({
         detail: `Invalid weekday '${part}'. Use 0 (Sunday) through 6 (Saturday).`,
       });
     }
@@ -284,16 +190,16 @@ const buildScheduleInput = Effect.fn("cli.schedule.buildScheduleInput")(function
     Number(Option.isSome(flags.everyMs)) +
     Number(Option.isSome(flags.once));
   if (triggers > 1) {
-    return yield* new ScheduleUsageError({
+    return yield* new ThreadUsageError({
       detail: "Pass only one of --time, --every-ms, or --once.",
     });
   }
   if (triggers === 0) {
     if (Option.isSome(flags.weekdays)) {
-      return yield* new ScheduleUsageError({ detail: "--weekdays requires --time <HH:MM>." });
+      return yield* new ThreadUsageError({ detail: "--weekdays requires --time <HH:MM>." });
     }
     if (flags.required) {
-      return yield* new ScheduleUsageError({
+      return yield* new ThreadUsageError({
         detail: "Pass one trigger: --time <HH:MM>, --every-ms <ms>, or --once <iso>.",
       });
     }
@@ -310,12 +216,29 @@ const buildScheduleInput = Effect.fn("cli.schedule.buildScheduleInput")(function
     };
   }
   if (Option.isSome(flags.weekdays)) {
-    return yield* new ScheduleUsageError({ detail: "--weekdays requires --time <HH:MM>." });
+    return yield* new ThreadUsageError({ detail: "--weekdays requires --time <HH:MM>." });
   }
   if (Option.isSome(flags.everyMs)) {
     return { type: "interval" as const, everyMs: flags.everyMs.value };
   }
   return { type: "once" as const, runAt: Option.getOrThrow(flags.once) };
+});
+
+const resolveBooleanToggle = Effect.fn("cli.schedule.resolveBooleanToggle")(function* (
+  enableFlag: boolean,
+  disableFlag: boolean,
+  enableName: string,
+  disableName: string,
+  createDefault: boolean | undefined,
+) {
+  if (enableFlag && disableFlag) {
+    return yield* new ThreadUsageError({
+      detail: `Pass at most one of ${enableName} or ${disableName}.`,
+    });
+  }
+  if (enableFlag) return true;
+  if (disableFlag) return false;
+  return createDefault;
 });
 
 const formatTaskLine = (task: OrchestratorMcpScheduledTask) => {
@@ -333,10 +256,12 @@ const decodeScheduledTaskIdValue = Schema.decodeUnknownEffect(ScheduledTaskId);
 const decodeScheduledTaskId = (value: string) =>
   decodeScheduledTaskIdValue(value.trim()).pipe(
     Effect.mapError(
-      () => new ScheduleUsageError({ detail: `'${value}' is not a scheduled task id.` }),
+      () => new ThreadUsageError({ detail: `'${value}' is not a scheduled task id.` }),
     ),
   );
 const decodeTitle = Schema.decodeUnknownEffect(TrimmedNonEmptyString);
+
+const RUNTIME_MODES = ["approval-required", "auto-accept-edits", "auto", "full-access"] as const;
 
 const scheduleListCommand = Command.make("list", {
   ...projectLocationFlags,
@@ -349,7 +274,7 @@ const scheduleListCommand = Command.make("list", {
   Command.withDescription("List scheduled tasks."),
   Command.withHandler((flags) =>
     withScheduleTools(
-      flags,
+      { ...flags, access: "read-only" },
       Effect.fn("cli.schedule.list")(function* (tools) {
         const project = Option.isSome(flags.project)
           ? yield* resolveProject(tools, flags.project.value)
@@ -403,34 +328,81 @@ const scheduleUpsertCommand = Command.make("upsert", {
     Flag.withDescription("Reuse one thread across runs, starting a fresh session each run."),
     Flag.withDefault(false),
   ),
+  noFreshSession: Flag.Boolean("no-fresh-session").pipe(
+    Flag.withDescription("Disable fresh-session reuse when updating an existing task."),
+    Flag.withDefault(false),
+  ),
+  enabled: Flag.Boolean("enabled").pipe(
+    Flag.withDescription("Ensure the task is enabled."),
+    Flag.withDefault(false),
+  ),
   disabled: Flag.Boolean("disabled").pipe(
     Flag.withDescription("Save the task paused instead of enabled."),
     Flag.withDefault(false),
+  ),
+  runtimeMode: Flag.Literals("runtime-mode", RUNTIME_MODES).pipe(
+    Flag.withDescription(
+      "Permission mode saved on a new scheduled task (default: auto). Ignored on updates.",
+    ),
+    Flag.withDefault("auto"),
   ),
   json: jsonFlag,
 }).pipe(
   Command.withDescription("Create a scheduled task, or update an existing one with --id."),
   Command.withHandler((flags) =>
     withScheduleTools(
-      flags,
+      { ...flags, access: flags.runtimeMode },
       Effect.fn("cli.schedule.upsert")(function* (tools) {
         const scheduledTaskId = Option.isSome(flags.id)
           ? yield* decodeScheduledTaskId(flags.id.value)
           : undefined;
+        const isUpdate = scheduledTaskId !== undefined;
+        const enabled = yield* resolveBooleanToggle(
+          flags.enabled,
+          flags.disabled,
+          "--enabled",
+          "--disabled",
+          isUpdate ? undefined : true,
+        );
+        const freshSession = yield* resolveBooleanToggle(
+          flags.freshSession,
+          flags.noFreshSession,
+          "--fresh-session",
+          "--no-fresh-session",
+          isUpdate ? undefined : false,
+        );
         const prompt = yield* readPrompt(flags.prompt);
         const schedule = yield* buildScheduleInput({
           time: flags.time,
           weekdays: flags.weekdays,
           everyMs: flags.everyMs,
           once: flags.once,
-          required: scheduledTaskId === undefined,
+          required: !isUpdate,
         });
         const title = Option.isSome(flags.title)
           ? yield* decodeTitle(flags.title.value).pipe(
-              Effect.mapError(() => new ScheduleUsageError({ detail: "--title cannot be empty." })),
+              Effect.mapError(() => new ThreadUsageError({ detail: "--title cannot be empty." })),
             )
           : undefined;
         const project = yield* resolveProject(tools, flags.project);
+        if (scheduledTaskId !== undefined) {
+          const existing = yield* tools.call(
+            "list_scheduled_tasks",
+            { scheduledTaskId },
+            OrchestratorMcpListScheduledTasksResult,
+          );
+          const match = existing.tasks[0];
+          if (match === undefined) {
+            return yield* new ThreadUsageError({
+              detail: `No scheduled task '${scheduledTaskId}' was found.`,
+            });
+          }
+          if (match.projectId !== project.id) {
+            return yield* new ThreadUsageError({
+              detail: `Scheduled task '${scheduledTaskId}' belongs to project '${match.projectId}', not '${project.id}'.`,
+            });
+          }
+        }
         const saved = yield* tools.call(
           "schedule_task",
           {
@@ -439,8 +411,8 @@ const scheduleUpsertCommand = Command.make("upsert", {
             prompt,
             ...(schedule === undefined ? {} : { schedule }),
             ...(title === undefined ? {} : { title }),
-            enabled: !flags.disabled,
-            freshSession: flags.freshSession,
+            ...(enabled === undefined ? {} : { enabled }),
+            ...(freshSession === undefined ? {} : { freshSession }),
           },
           OrchestratorMcpScheduleTaskResult,
         );
@@ -463,7 +435,7 @@ const scheduleDeleteCommand = Command.make("delete", {
   Command.withDescription("Delete a scheduled task."),
   Command.withHandler((flags) =>
     withScheduleTools(
-      flags,
+      { ...flags, access: "auto" },
       Effect.fn("cli.schedule.delete")(function* (tools) {
         const scheduledTaskId = yield* decodeScheduledTaskId(flags.id);
         const result = yield* tools.call(
