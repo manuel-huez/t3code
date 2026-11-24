@@ -137,6 +137,8 @@ jobs:
       T3CODE_CLERK_JWT_TEMPLATE: ${{ inputs.clerk_jwt_template }}
       T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ inputs.clerk_cli_oauth_client_id }}
       T3CODE_RELAY_URL: ${{ inputs.relay_url }}
+      # A step's `if` cannot read secrets; the job's env can.
+      FORK_MAC_SIGNING: ${{ secrets.FORK_MAC_CERTIFICATE_P12 != '' }}
     steps:
       # This repository is public, so Git needs no credentials. checkout's
       # credential cleanup runs submodule foreach even with submodules disabled,
@@ -835,7 +837,7 @@ jobs:
       # instead of queuing for a second macOS runner. Squirrel.Mac accepts updates signed
       # by the same certificate; the update manifest is rewritten and stale blockmaps dropped.
       - name: Sign macOS fork app and rewrite its update manifest
-        if: inputs.platform == 'mac' && secrets.FORK_MAC_CERTIFICATE_P12 != ''
+        if: inputs.platform == 'mac' && env.FORK_MAC_SIGNING == 'true'
         shell: bash
         env:
           CERTIFICATE_P12: ${{ secrets.FORK_MAC_CERTIFICATE_P12 }}
@@ -885,7 +887,7 @@ jobs:
           cat fork-publish/latest-mac.yml
 
       - name: Upload signed macOS fork app
-        if: inputs.platform == 'mac' && secrets.FORK_MAC_CERTIFICATE_P12 != ''
+        if: inputs.platform == 'mac' && env.FORK_MAC_SIGNING == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-mac-arm64-signed
