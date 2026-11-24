@@ -121,6 +121,9 @@ jobs:
       rust_target: aarch64-apple-darwin
       resource_key: darwin-arm64
       cli_archive: true
+    secrets:
+      FORK_MAC_CERTIFICATE_P12: ${{ secrets.FORK_MAC_CERTIFICATE_P12 }}
+      FORK_MAC_CERTIFICATE_PASSWORD: ${{ secrets.FORK_MAC_CERTIFICATE_PASSWORD }}
 
   desktop_linux_x64:
     name: Desktop Linux x64
@@ -144,79 +147,9 @@ jobs:
       resource_key: linux-x64
       cli_archive: true
 
-  sign_mac:
-    name: Sign macOS app
-    needs: [prepare, desktop_mac_arm64]
-    runs-on: macos-26
-    timeout-minutes: 15
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: desktop-mac-arm64
-          path: unsigned
-
-      # Squirrel.Mac installs an update only when it meets the running app's
-      # signing requirement, which names this certificate. Re-signing changes the
-      # zip, so the update manifest is rewritten and the stale blockmaps dropped.
-      - name: Sign the app and rewrite its update manifest
-        env:
-          CERTIFICATE_P12: ${{ secrets.FORK_MAC_CERTIFICATE_P12 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.FORK_MAC_CERTIFICATE_PASSWORD }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          keychain="$RUNNER_TEMP/fork-signing.keychain-db"
-          keychain_password="$(openssl rand -hex 16)"
-          trap 'security delete-keychain "$keychain" 2>/dev/null || true' EXIT
-          printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/wwdr.cer" https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security import "$RUNNER_TEMP/wwdr.cer" -k "$keychain"
-          rm "$RUNNER_TEMP/signing.p12"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          identity="$(security find-identity -v -p codesigning "$keychain" | sed -nE 's/.*"(Apple Development: [^"]+)".*/\1/p' | head -n 1)"
-          [[ -n "$identity" ]] || { echo "No Apple Development identity in FORK_MAC_CERTIFICATE_P12." >&2; exit 1; }
-
-          zip_path="$(ls unsigned/*.zip)"
-          zip_name="$(basename "$zip_path")"
-          mkdir app publish
-          ditto -x -k "$zip_path" app
-          bundle="$(ls -d app/*.app)"
-          codesign --force --deep --timestamp=none --preserve-metadata=entitlements \
-            --keychain "$keychain" --sign "$identity" "$bundle"
-          codesign --verify --deep --strict "$bundle"
-          codesign --display --requirements - "$bundle"
-          ditto -c -k --sequesterRsrc --keepParent "$bundle" "publish/$zip_name"
-
-          sha512="$(openssl dgst -sha512 -binary "publish/$zip_name" | base64)"
-          size="$(stat -f %z "publish/$zip_name")"
-          cat > publish/latest-mac.yml <<EOF
-          version: $VERSION
-          files:
-            - url: $zip_name
-              sha512: $sha512
-              size: $size
-          path: $zip_name
-          sha512: $sha512
-          releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'
-          EOF
-          cat publish/latest-mac.yml
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: desktop-mac-arm64-signed
-          path: publish/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-
   publish:
     name: Publish release
-    needs: [prepare, desktop_linux_x64, sign_mac]
+    needs: [prepare, desktop_linux_x64, desktop_mac_arm64]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
