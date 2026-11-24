@@ -2,7 +2,8 @@ name: Fork release
 
 # Builds this fork's deploy branch (upstream main plus the owner's branches) and
 # publishes it as the fork's latest GitHub release: the macOS arm64 app, which
-# updates itself from these releases, and the Linux x64 CLI archive, which
+# updates itself from these releases, and the macOS arm64 and Linux x64 CLI
+# archives, which
 # servers install with T3CODE_RELEASE_BASE_URL pointing here.
 #
 # The app is signed with the owner's own certificate, not a Developer ID: macOS
@@ -119,6 +120,7 @@ jobs:
       arch: arm64
       rust_target: aarch64-apple-darwin
       resource_key: darwin-arm64
+      cli_archive: true
 
   desktop_linux_x64:
     name: Desktop Linux x64
@@ -230,6 +232,11 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           sparse-checkout: .env.example
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: cli-mac-arm64
+          path: assets
 
       - uses: actions/download-artifact@v8
         with:
