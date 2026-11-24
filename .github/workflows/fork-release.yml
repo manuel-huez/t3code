@@ -147,7 +147,7 @@ jobs:
   sign_mac:
     name: Sign macOS app
     needs: [prepare, desktop_mac_arm64]
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v8
