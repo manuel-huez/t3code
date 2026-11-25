@@ -21,6 +21,14 @@ export const SERVICE_UNIT_ENV = "T3_BOOT_SERVICE_UNIT";
 export const SERVICE_STOP_MARKER_FILE = ".service-stopping";
 /** Marks a repointed unit whose service still runs the old version; launcher startup clears it. */
 export const SERVICE_RESTART_PENDING_FILE = ".restart-pending";
+/**
+ * macOS keeps privacy grants such as Full Disk Access for the program launchd starts, by its path,
+ * and applies them to everything it starts. The runtime moves with each version, so the launch
+ * agent starts it through the resource monitor's `service-launch` mode, copied to this fixed file
+ * in the runtime directory.
+ */
+export const SERVICE_PROGRAM_FILE = "t3-service";
+export const SERVICE_PROGRAM_COMMAND = "service-launch";
 /** Held by a Windows launcher while it runs: Task Scheduler tracks only the task's console host. */
 export const SERVICE_LAUNCHER_LOCK_FILE = "service-launcher.lock";
 /** Held by a launcher while it has, or is about to start, a server: an SSH launch waits for that
@@ -102,10 +110,16 @@ export function serviceUnitLogPathOf(contents: string): string | undefined {
 export function serviceUnitProgramOf(contents: string): string | undefined {
   const systemd = /^ExecStart=("(?:\\.|[^"\\])*"|\S+)/m.exec(contents)?.[1];
   if (systemd !== undefined) return unquoteSystemdValue(systemd);
-  const plist = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(
-    contents,
-  )?.[1];
-  if (plist !== undefined) return unescapeXmlText(plist);
+  const plist = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(contents)?.[1];
+  if (plist !== undefined) {
+    const [first, command, program] = Array.from(
+      plist.matchAll(/<string>([^<]*)<\/string>/g),
+      (match) => unescapeXmlText(match[1] ?? ""),
+    );
+    return command === SERVICE_PROGRAM_COMMAND && first?.endsWith(`/${SERVICE_PROGRAM_FILE}`)
+      ? program
+      : first;
+  }
   const task = /<Arguments>--headless "([^"]*)"/.exec(contents)?.[1];
   return task === undefined ? undefined : unquoteWindowsArgument(task);
 }
