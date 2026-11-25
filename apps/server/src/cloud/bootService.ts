@@ -49,6 +49,8 @@ import {
   parseServiceState,
   serviceStateActiveVersion,
   serviceStateHasPendingUpdate,
+  SERVICE_PROGRAM_COMMAND,
+  SERVICE_PROGRAM_FILE,
   systemdUnitDirectoryOf,
   type ServiceState,
 } from "./serviceProtocol.ts";
@@ -862,6 +864,19 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   const host = input.host ?? { execPath: hostExecPath };
   const runtimePaths = pinnedRuntimePaths(path, input.baseDir, input.cliVersion, platform);
   const versionsDir = pinnedRuntimeVersionsDir(path, input.baseDir);
+  // SERVICE_PROGRAM_FILE: launchd starts the runtime through a launcher at a fixed path.
+  const serviceProgram =
+    platform === "darwin"
+      ? {
+          path: path.join(input.baseDir, "runtime", SERVICE_PROGRAM_FILE),
+          source: path.join(
+            runtimePaths.versionDir,
+            "resource-monitor",
+            `darwin-${arch}`,
+            "t3-resource-monitor",
+          ),
+        }
+      : undefined;
   const xmlSafeInstallerDirectories = installerPath.split(":").filter(
     (directory) =>
       directory.length > 0 &&
@@ -1018,7 +1033,11 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     });
     const unitPath = manager?.unitPath ?? "";
     const plan: BootServicePlan = {
-      program: [runtimePaths.entryPath, "__service-launcher"],
+      program: [
+        ...(serviceProgram === undefined ? [] : [serviceProgram.path, SERVICE_PROGRAM_COMMAND]),
+        runtimePaths.entryPath,
+        "__service-launcher",
+      ],
       baseDir: input.baseDir,
       logPath,
       unitPath,
@@ -1039,15 +1058,16 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       ? Effect.undefined
       : Effect.map(isThisHome(installedBaseDir), (same) => (same ? undefined : installedBaseDir));
   };
-  const writeDurably = (filePath: string, contents: string | Uint8Array) =>
+  const writeDurably = (filePath: string, contents: string | Uint8Array, mode = 0o600) =>
     Effect.scoped(
       Effect.gen(function* () {
         const directory = path.dirname(filePath);
         yield* fs.makeDirectory(directory, { recursive: true });
         const tempPath = yield* fs.makeTempFileScoped({ directory, prefix: ".service-write-" });
         yield* typeof contents === "string"
-          ? fs.writeFileString(tempPath, contents, { mode: 0o600 })
-          : fs.writeFile(tempPath, contents, { mode: 0o600 });
+          ? fs.writeFileString(tempPath, contents, { mode })
+          : fs.writeFile(tempPath, contents, { mode });
+        yield* fs.chmod(tempPath, mode);
         // Opened read-write: Windows refuses to flush a handle without write access.
         yield* (yield* fs.open(tempPath, { flag: "r+" })).sync;
         yield* fs.rename(tempPath, filePath);
@@ -1060,6 +1080,21 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         );
       }),
     ).pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
+  // Replaced only when its bytes change: macOS keeps the grants for a binary signed the same way.
+  const installServiceProgram = Effect.fn("cloud.boot_service.install_service_program")(
+    function* (program: { readonly path: string; readonly source: string }) {
+      const contents = yield* fs.readFile(program.source);
+      const current = Option.getOrUndefined(yield* fs.readFile(program.path).pipe(Effect.option));
+      if (
+        current?.length === contents.length &&
+        current.every((byte, index) => byte === contents[index])
+      ) {
+        return;
+      }
+      yield* writeDurably(program.path, contents, 0o755);
+    },
+    Effect.mapError((cause) => new BootServiceInstallError({ cause })),
+  );
   const planForUnit = (unit: string): BootServicePlan => {
     const effectiveInstallBinDir =
       installBinDir || serviceUnitEnvironmentValueOf(unit, "T3CODE_INSTALL_BIN_DIR");
@@ -1452,6 +1487,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
             if (serviceStateActiveVersion(written) !== input.cliVersion) {
               return yield* new BootServiceUpdatePendingError();
             }
+          }
+          if (serviceProgram !== undefined) {
+            yield* installServiceProgram(serviceProgram);
           }
           const unit = manager.render(plan);
           yield* writeDurably(
