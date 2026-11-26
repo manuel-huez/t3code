@@ -2,6 +2,7 @@ import { ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import { MuseSettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
@@ -27,7 +28,7 @@ import { makeUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 import { enrichMuseSnapshot, latestMuseVersion, museMaintenance } from "./maintenance.ts";
 import { makeMuseEnvironment } from "./sdk.ts";
 import { museUsageReader } from "./usage.ts";
-import type * as MuseUsageHome from "./MuseUsageHome.ts";
+import * as MuseUsageHome from "./MuseUsageHome.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -57,7 +58,8 @@ export type MuseDriverEnv =
   | HttpClient.HttpClient
   | ProviderLatestVersions.ProviderLatestVersions
   | Path.Path
-  | ProviderEventLoggers.ProviderEventLoggers;
+  | ProviderEventLoggers.ProviderEventLoggers
+  | MuseUsageHome.MuseUsageHome;
 
 export const MuseDriver: ProviderDriver<
   MuseSettings,
@@ -87,6 +89,7 @@ export const MuseDriver: ProviderDriver<
     const { cwd } = host.paths;
     const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
     const hostEnvironment = yield* HostProcess.Environment;
+    const usageHome = yield* MuseUsageHome.MuseUsageHome;
     // Drop an inherited META_API_KEY so Muse uses its login; an instance value still wins.
     const processEnvironment = yield* mergeProviderInstanceEnvironment(
       environment,
@@ -232,6 +235,14 @@ export const MuseDriver: ProviderDriver<
       displayName,
       accentColor,
       enabled,
+      // Muse reports its home itself; the lookup is cached per binary and environment.
+      dataDirectories: usageHome
+        .resolve({
+          binaryPath: effectiveConfig.binaryPath,
+          environment: processEnvironment,
+          awaitRefresh: true,
+        })
+        .pipe(Effect.map((home) => (Option.isSome(home) && home.value ? [home.value] : []))),
       snapshot: { ...snapshot, resolveMaintenance, refreshUsage: Effect.void },
       orchestrationAdapter,
       textGeneration,

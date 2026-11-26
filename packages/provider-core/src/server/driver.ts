@@ -60,6 +60,11 @@ export interface ProviderInstance {
   readonly invalidateCaches?: Effect.Effect<void>;
   /** Moves a long-lived service onto a newly updated binary before its version is read back. */
   readonly afterUpdate?: Effect.Effect<void, ProviderDriverError>;
+  /**
+   * Folders where this instance's agent keeps its own state, such as sessions and caches,
+   * for disk usage. Omit when the agent's location is unknown; it is then not reported.
+   */
+  readonly dataDirectories?: Effect.Effect<ReadonlyArray<string>>;
   readonly consumeResetCredit?: (
     creditId: string | undefined,
   ) => Effect.Effect<ProviderConsumeResetCreditOutcome, ProviderDriverError>;
