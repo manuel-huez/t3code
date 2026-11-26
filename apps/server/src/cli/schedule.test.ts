@@ -174,7 +174,13 @@ it.effect("list, upsert, update preservation, ownership guard, and delete work o
 
     yield* run(["delete", "--base-dir", baseDir, "--json", taskId]);
 
-    assert.deepEqual(issuedAccessLevels, ["read-only", "full-access", "auto", "auto", "auto"]);
+    assert.deepEqual(issuedAccessLevels, [
+      "read-only",
+      "full-access",
+      "full-access",
+      "full-access",
+      "full-access",
+    ]);
     assert.deepEqual(
       calls.filter((c) => c.tool !== "t3_project_list"),
       [

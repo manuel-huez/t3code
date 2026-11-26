@@ -351,7 +351,7 @@ const scheduleUpsertCommand = Command.make("upsert", {
   Command.withDescription("Create a scheduled task, or update an existing one with --id."),
   Command.withHandler((flags) =>
     withScheduleTools(
-      { ...flags, access: flags.runtimeMode },
+      { ...flags, access: Option.isSome(flags.id) ? "full-access" : flags.runtimeMode },
       Effect.fn("cli.schedule.upsert")(function* (tools) {
         const scheduledTaskId = Option.isSome(flags.id)
           ? yield* decodeScheduledTaskId(flags.id.value)
@@ -435,7 +435,7 @@ const scheduleDeleteCommand = Command.make("delete", {
   Command.withDescription("Delete a scheduled task."),
   Command.withHandler((flags) =>
     withScheduleTools(
-      { ...flags, access: "auto" },
+      { ...flags, access: "full-access" },
       Effect.fn("cli.schedule.delete")(function* (tools) {
         const scheduledTaskId = yield* decodeScheduledTaskId(flags.id);
         const result = yield* tools.call(
