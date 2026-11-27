@@ -119,6 +119,16 @@ const withProjectService = <A, E>(
 const readProjects = (baseDir: string) =>
   withProjectService(baseDir, (projects) => projects.snapshot);
 
+const readSettings = (baseDir: string) =>
+  Effect.gen(function* () {
+    const config = yield* makeConfig(baseDir);
+    return yield* ServerSettings.readServerSettingsFromDisk.pipe(
+      Effect.provide(
+        Layer.mergeAll(ManagedPolicy.layerTest(), ServerConfig.layer(config), NodeServices.layer),
+      ),
+    );
+  });
+
 it.live("uses the literal folder when a relative project path starts with a space", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -167,6 +177,27 @@ it.effect(
 
       yield* runCli(["project", "rename", workspaceRoot, "Beta", "--base-dir", baseDir]);
       assert.equal((yield* readProjects(baseDir)).projects[0]?.title, "Beta");
+
+      // Provisioning sets one project override by path; running it again changes nothing.
+      const set = (key: string, value: string) =>
+        runCli(["project", "set", workspaceRoot, key, value, "--base-dir", baseDir]);
+      yield* set("enableAgentBrowserAccess", "false");
+      yield* set("agentBrowserAccessMainThreadsOnly", "true");
+      yield* set("agentBrowserAccessMainThreadsOnly", "true");
+      assert.deepEqual((yield* readSettings(baseDir)).projectSettingsOverrides[added!.id], {
+        enableAgentBrowserAccess: false,
+        agentBrowserAccessMainThreadsOnly: true,
+      });
+      for (const [key, value, message] of [
+        ["notASetting", "true", "'notASetting' is not a project setting"],
+        ["agentBrowserAccessMainThreadsOnly", "yes", "not valid JSON"],
+        ["agentBrowserAccessMainThreadsOnly", '"true"', "not valid JSON"],
+      ] as const) {
+        const error = yield* set(key, value).pipe(
+          Effect.match({ onFailure: (error) => error, onSuccess: () => assert.fail(key) }),
+        );
+        assert.include(error.message, message);
+      }
 
       yield* runCli(["project", "remove", added?.id ?? "", "--base-dir", baseDir]);
       assert.deepEqual((yield* readProjects(baseDir)).projects, []);
