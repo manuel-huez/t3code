@@ -4,7 +4,9 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
   PreviewTabId,
+  ProjectId,
   ProviderInstanceId,
+  SecretRequestError,
   ThreadId,
   type PreviewAutomationRequest,
 } from "@t3tools/contracts";
@@ -20,12 +22,106 @@ import {
   parseThreadSegmentFromAttachmentId,
 } from "../../../attachmentStore.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as SecretRequests from "../../../secrets/SecretRequests.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { liveThreadsLayer } from "../../McpToolAccess.testkit.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { claimPreviewRecording, layerStandard } from "./handlers.ts";
 import { PreviewStandardToolkit } from "./tools.ts";
+
+const threadScope = {
+  environmentId: EnvironmentId.make("environment-1"),
+  requestNamespace: "provider-session-1",
+  thread: {
+    threadId: ThreadId.make("thread-1"),
+    providerSessionId: "provider-session-1",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  client: undefined,
+  capabilities: new Set(["preview"] as const),
+  issuedAt: 1,
+};
+
+it.effect("preview_act types a secretRef's value, which never comes back to the model", () =>
+  Effect.gen(function* () {
+    const scope = yield* McpInvocationContext.McpInvocationContext;
+    const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const connected = yield* Deferred.make<void>();
+    const typed: PreviewAutomationRequest[] = [];
+    const events = yield* broker.connect({
+      clientId: "client-1",
+      environmentId: scope.environmentId,
+    });
+    yield* Stream.runForEach(events, (event) => {
+      if (event.type === "connected") return Deferred.succeed(connected, undefined);
+      if (event.request.operation === "type") typed.push(event.request);
+      return broker.respond({
+        clientId: "client-1",
+        connectionId: event.connectionId,
+        requestId: event.request.requestId,
+        ...(event.request.operation === "type" &&
+        (event.request.input as { text: string }).text === "fails"
+          ? { ok: false, error: { _tag: "PreviewAutomationExecutionError", message: "no fails" } }
+          : { ok: true, result: {} }),
+      });
+    }).pipe(Effect.forkScoped);
+    yield* Deferred.await(connected);
+    const toolkit = yield* PreviewStandardToolkit.pipe(
+      Effect.provide(McpToolAccess.HandlersLayer.layer(layerStandard)),
+    );
+    const act = (input: object) =>
+      toolkit
+        .handle("preview_act", { action: "type", locator: "aria-ref=e1", ...input })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.result);
+
+    const results = yield* act({ secretRef: "secret-ref:password" });
+    expect(typed.map((request) => request.input)).toEqual([
+      { locator: "aria-ref=e1", text: "hunter2" },
+    ]);
+    expect(JSON.stringify(results)).not.toContain("hunter2");
+    // The ref is one use, as everywhere else.
+    expect(JSON.stringify(yield* act({ secretRef: "secret-ref:password" }))).toContain(
+      "invalid_request",
+    );
+    const failed = JSON.stringify(yield* act({ secretRef: "secret-ref:fails" }));
+    expect(failed).toContain("Typing the secret failed; the field may hold part of it.");
+    expect(failed).not.toContain("no fails");
+    for (const input of [{}, { text: "x", secretRef: "secret-ref:password" }]) {
+      expect(JSON.stringify(yield* act(input))).toContain("exactly one of text or secretRef");
+    }
+  }).pipe(
+    Effect.provideService(McpInvocationContext.McpInvocationContext, threadScope),
+    Effect.provide(
+      Layer.mergeAll(
+        PreviewAutomationBroker.layer,
+        liveThreadsLayer,
+        Layer.effect(
+          SecretRequests.SecretRequests,
+          Effect.sync(() => {
+            const secrets = new Map([
+              ["secret-ref:password", "hunter2"],
+              ["secret-ref:fails", "fails"],
+            ]);
+            return SecretRequests.SecretRequests.of({
+              consume: ({ ref, projectId }) => {
+                const value = secrets.get(ref);
+                secrets.delete(ref);
+                return value === undefined || projectId !== ProjectId.make("project:mcp-test")
+                  ? Effect.fail(new SecretRequestError({ reason: "ref_unavailable" }))
+                  : Effect.succeed(value);
+              },
+              answer: () => Effect.die("unused"),
+              savedRef: () => Effect.die("unused"),
+              saveToFile: () => Effect.die("unused"),
+              savePasted: () => Effect.die("unused"),
+            });
+          }),
+        ),
+      ).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+    ),
+  ),
+);
 
 it.effect("preview_open navigates the opened tab to a dev server in one tool call", () =>
   Effect.gen(function* () {
@@ -82,18 +178,7 @@ it.effect("preview_open navigates the opened tab to a dev server in one tool cal
     expect(requests[1]?.tabId).toBe(tabId);
     expect(requests[1]?.tabIdExplicit).toBe(true);
   }).pipe(
-    Effect.provideService(McpInvocationContext.McpInvocationContext, {
-      environmentId: EnvironmentId.make("environment-1"),
-      requestNamespace: "provider-session-1",
-      thread: {
-        threadId: ThreadId.make("thread-1"),
-        providerSessionId: "provider-session-1",
-        providerInstanceId: ProviderInstanceId.make("codex"),
-      },
-      client: undefined,
-      capabilities: new Set(["preview"] as const),
-      issuedAt: 1,
-    }),
+    Effect.provideService(McpInvocationContext.McpInvocationContext, threadScope),
     Effect.provide(
       Layer.mergeAll(PreviewAutomationBroker.layer, liveThreadsLayer).pipe(
         Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),

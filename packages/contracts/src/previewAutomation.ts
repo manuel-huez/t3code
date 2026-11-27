@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, SecretRef, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   PREVIEW_VIEWPORT_MAX_AREA,
   PreviewRenderedViewportSize,
@@ -402,6 +402,28 @@ export const PreviewAutomationTypeInput = Schema.Struct({
 );
 export type PreviewAutomationTypeInput = typeof PreviewAutomationTypeInput.Type;
 
+/**
+ * What an agent passes to type: literal `text`, or a `secretRef` the server
+ * resolves to text, so the value never reaches the model.
+ */
+export const PreviewAutomationTypeActInput = Schema.Struct({
+  ...PreviewAutomationTypeInput.fields,
+  text: Schema.optional(Schema.String),
+  secretRef: Schema.optional(SecretRef),
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      !(input.selector !== undefined && input.locator !== undefined) ||
+      "Provide at most one of selector or locator.",
+  ),
+  Schema.makeFilter(
+    (input) =>
+      (input.text === undefined) !== (input.secretRef === undefined) ||
+      "Provide exactly one of text or secretRef.",
+  ),
+);
+export type PreviewAutomationTypeActInput = typeof PreviewAutomationTypeActInput.Type;
+
 export const PreviewAutomationPressInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
   key: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
@@ -428,7 +450,7 @@ export type PreviewAutomationScrollInput = typeof PreviewAutomationScrollInput.T
 /** Strict input for each `preview_act` action. */
 export const PreviewAutomationActInputs = {
   click: PreviewAutomationClickInput,
-  type: PreviewAutomationTypeInput,
+  type: PreviewAutomationTypeActInput,
   hover: PreviewAutomationHoverInput,
   select: PreviewAutomationSelectInput,
   drag: PreviewAutomationDragInput,
@@ -458,6 +480,7 @@ export const PreviewAutomationActInput = Schema.Struct({
   button: Schema.optional(Schema.Literals(["left", "right", "middle"])),
   clickCount: Schema.optional(Schema.Int),
   text: Schema.optional(Schema.String),
+  secretRef: Schema.optional(SecretRef),
   clear: Schema.optional(Schema.Boolean),
   values: Schema.optional(Schema.Array(Schema.String)),
   source: Schema.optional(Locator),
