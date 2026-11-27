@@ -2,8 +2,12 @@ import {
   AuthStandardClientScopes,
   CommandId,
   EnvironmentHttpCommonError,
+  PROJECT_SCOPED_SERVER_SETTING_KEYS,
   PROJECT_TRACKED_FOLDERS_MAX,
+  ProjectSettingsOverrides,
+  type ServerSettingsError,
   type ProjectMutation,
+  type ProjectScopedServerSettingKey,
   type ProjectSnapshot,
   ProjectId,
 } from "@t3tools/contracts";
@@ -12,11 +16,13 @@ import { splitsSurrogatePair } from "@t3tools/shared/assistantCitations";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Record from "effect/Record";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
@@ -155,6 +161,31 @@ export class ProjectTooManyTrackedFoldersError extends Schema.TaggedError<Projec
   }
 }
 
+export class ProjectSettingKeyError extends Schema.TaggedError<ProjectSettingKeyError>()(
+  "ProjectSettingKeyError",
+  {
+    operation: Schema.Literal("setProjectSetting"),
+    key: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `'${this.key}' is not a project setting. Use one of: ${PROJECT_SCOPED_SERVER_SETTING_KEYS.join(", ")}.`;
+  }
+}
+
+export class ProjectSettingValueError extends Schema.TaggedError<ProjectSettingValueError>()(
+  "ProjectSettingValueError",
+  {
+    operation: Schema.Literal("setProjectSetting"),
+    key: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `The value is not valid JSON for '${this.key}': ${this.cause instanceof Error ? this.cause.message : String(this.cause)}`;
+  }
+}
+
 export const ProjectCommandError = Schema.Union([
   ProjectCommandIdGenerationError,
   ProjectLiveServerDeclaredResponseError,
@@ -164,6 +195,8 @@ export const ProjectCommandError = Schema.Union([
   ProjectNotFoundError,
   ProjectAlreadyExistsError,
   ProjectTooManyTrackedFoldersError,
+  ProjectSettingKeyError,
+  ProjectSettingValueError,
 ]);
 export type ProjectCommandError = typeof ProjectCommandError.Type;
 
@@ -301,6 +334,26 @@ const findActiveProjectTarget = Effect.fn("findActiveProjectTarget")(function* (
   } satisfies ProjectMutationTarget;
 });
 
+type UseProjectSettings = <A>(
+  use: (
+    settings: ServerSettings.ServerSettingsService["Service"],
+  ) => Effect.Effect<A, ServerSettingsError>,
+) => Effect.Effect<
+  A,
+  Error,
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+  | Path.Path
+  | SecureRandom.SecureRandom
+>;
+
+const decodeProjectSetting = Record.map(ProjectSettingsOverrides.fields, (field) =>
+  Schema.decodeEffect(Schema.fromJsonString(Schema.toType(field))),
+);
+
+const isProjectSettingKey = (key: string): key is ProjectScopedServerSettingKey =>
+  (PROJECT_SCOPED_SERVER_SETTING_KEYS as ReadonlyArray<string>).includes(key);
+
 const runProjectMutation = Effect.fn("runProjectMutation")(function* (
   flags: CliAuthLocationFlags,
   run: (input: {
@@ -308,9 +361,11 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
     readonly dispatch: (
       command: ProjectCliDispatchCommand,
     ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+    readonly useSettings: UseProjectSettings;
   }) => Effect.Effect<
     string,
     Error,
+    | ChildProcessSpawner.ChildProcessSpawner
     | SecureRandom.SecureRandom
     | FileSystem.FileSystem
     | HttpClient.HttpClient
@@ -326,22 +381,41 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
     const output = yield* RunningServer.changeState({
       scopes: AuthStandardClientScopes,
       viaServer: Effect.fn("project.viaServer")(function* (client) {
+        // Settings live in a file the running server watches, so this writes it directly.
+        const settingsLayer = ServerSettings.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              ServerSecretStore.layer,
+              SqlitePersistence.layerCliConfig,
+              ManagedPolicy.layer,
+            ),
+          ),
+          Layer.provide(ServerConfig.layer(config)),
+          Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+        );
         return yield* run({
           snapshot: yield* client.projects.snapshot({ headers: {} }),
           dispatch: (command) =>
             client.projects.mutate({ headers: {}, payload: command } as Parameters<
               typeof client.projects.mutate
             >[0]),
+          useSettings: (use) =>
+            ServerSettings.ServerSettingsService.pipe(
+              Effect.flatMap(use),
+              Effect.provide(settingsLayer),
+            ),
         });
       }, Effect.mapError(projectCommandErrorFromServerAnswer)),
       locally: Effect.promise(() => import("../orchestration-v2/runtimeLayer.ts")).pipe(
         Effect.flatMap(({ layerProjectService }) =>
           Effect.gen(function* () {
             const projects = yield* ProjectService.ProjectService;
+            const settings = yield* ServerSettings.ServerSettingsService;
             return yield* run({
               snapshot: yield* projects.snapshot,
               dispatch: (command) =>
                 projectMutationOperation(projects, command).pipe(Effect.asVoid),
+              useSettings: (use) => use(settings),
             });
           }).pipe(
             Effect.provide(
@@ -561,7 +635,60 @@ const projectRenameCommand = Command.make("rename", {
   ),
 );
 
+const projectSetCommand = Command.make("set", {
+  ...projectLocationFlags,
+  project: Argument.String("project").pipe(
+    Argument.withDescription("Project id or workspace root."),
+  ),
+  key: Argument.String("key").pipe(
+    Argument.withDescription("Project setting, such as agentBrowserAccessMainThreadsOnly."),
+  ),
+  value: Argument.String("value").pipe(
+    Argument.withDescription('The setting\'s value as JSON, such as true or "full-access".'),
+  ),
+}).pipe(
+  Command.withDescription("Set a project's override of a server setting."),
+  Command.withHandler((flags) =>
+    runProjectMutation(
+      flags,
+      Effect.fn("projectSetSetting")(function* ({
+        snapshot,
+        useSettings,
+      }: {
+        readonly snapshot: ProjectSnapshot;
+        readonly useSettings: UseProjectSettings;
+      }) {
+        const project = yield* findActiveProjectTarget({ snapshot, identifier: flags.project });
+        const key = flags.key;
+        if (!isProjectSettingKey(key)) {
+          return yield* new ProjectSettingKeyError({ operation: "setProjectSetting", key });
+        }
+        const value = yield* decodeProjectSetting[key](flags.value).pipe(
+          Effect.mapError(
+            (cause) => new ProjectSettingValueError({ operation: "setProjectSetting", key, cause }),
+          ),
+        );
+        yield* useSettings((settings) =>
+          Effect.gen(function* () {
+            const current = (yield* settings.getSettings).projectSettingsOverrides[project.id];
+            // A patch replaces the project's whole override set, so keep the others.
+            yield* settings.updateSettings({
+              projectSettingsOverrides: { [project.id]: { ...current, [key]: value } },
+            });
+          }),
+        );
+        return `Set ${key} to ${flags.value} for project ${project.id} (${project.title}).`;
+      }),
+    ),
+  ),
+);
+
 export const projectCommand = Command.make("project").pipe(
   Command.withDescription("Manage projects."),
-  Command.withSubcommands([projectAddCommand, projectRemoveCommand, projectRenameCommand]),
+  Command.withSubcommands([
+    projectAddCommand,
+    projectRemoveCommand,
+    projectRenameCommand,
+    projectSetCommand,
+  ]),
 );
