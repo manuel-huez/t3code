@@ -8,7 +8,7 @@ import { useRelativeTimeState } from "../../hooks/useRelativeTimeState";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 
 export function StatBlock({
   label,
@@ -26,20 +26,18 @@ export function StatBlock({
       <div className="flex min-w-0 items-center gap-1.5 text-2xs font-medium uppercase tracking-widest text-muted-foreground/70">
         <span className="min-w-0 truncate">{label}</span>
         {tooltip ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  className="cursor-pointer inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground"
-                  aria-label={`${label} details`}
-                >
-                  <InfoIcon className="size-3" />
-                </button>
-              }
-            />
-            <TooltipPopup side="top">{tooltip}</TooltipPopup>
-          </Tooltip>
+          <SharedTooltipTrigger
+            render={
+              <button
+                type="button"
+                className="cursor-pointer inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground"
+                aria-label={`${label} details`}
+              >
+                <InfoIcon className="size-3" />
+              </button>
+            }
+            label={tooltip}
+          />
         ) : null}
       </div>
       <div
@@ -180,21 +178,19 @@ export function DiagnosticsRefreshButton({
   onClick: () => void;
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <Button
-            size="icon-xs"
-            variant="ghost-muted"
-            disabled={isPending}
-            onClick={onClick}
-            aria-label={label}
-          >
-            <RefreshIcon refreshing={isPending} />
-          </Button>
-        }
-      />
-      <TooltipPopup side="top">{label}</TooltipPopup>
-    </Tooltip>
+    <SharedTooltipTrigger
+      render={
+        <Button
+          size="icon-xs"
+          variant="ghost-muted"
+          disabled={isPending}
+          onClick={onClick}
+          aria-label={label}
+        >
+          <RefreshIcon refreshing={isPending} />
+        </Button>
+      }
+      label={label}
+    />
   );
 }

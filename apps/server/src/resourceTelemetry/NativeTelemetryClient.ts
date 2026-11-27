@@ -198,6 +198,10 @@ export class NativeTelemetryClient extends Context.Service<
       snapshot: HostPowerSnapshot,
     ) => Effect.Effect<void, NativeTelemetryClientError>;
     readonly sampleNow: Effect.Effect<NativeTelemetrySnapshot, NativeTelemetryClientError>;
+    readonly processIdentities?: Effect.Effect<
+      ReadonlyArray<ResourceMonitorProcessTableEntry>,
+      NativeTelemetryClientError
+    >;
     readonly processTable: Effect.Effect<
       ReadonlyArray<ResourceMonitorProcessTableEntry>,
       NativeTelemetryClientError
@@ -387,6 +391,27 @@ function canCommandNativeTelemetrySidecar(
   return hasHandle && (status === "healthy" || status === "degraded");
 }
 
+export function requestProcessTable<A, E>(
+  write: Effect.Effect<void, E>,
+  response: Deferred.Deferred<A, E>,
+  timeout: Duration.Duration,
+  operation: NativeTelemetryRequestTimedOut["operation"] = "processTable",
+) {
+  return write.pipe(
+    Effect.andThen(Deferred.await(response)),
+    Effect.timeoutOrElse({
+      duration: timeout,
+      orElse: () =>
+        Effect.fail(
+          new NativeTelemetryRequestTimedOut({
+            operation,
+            timeoutMs: Duration.toMillis(timeout),
+          }),
+        ),
+    }),
+  );
+}
+
 /** @public */
 export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(function* () {
   const binary = yield* ResourceMonitorBinary.ResourceMonitorBinary;
@@ -467,6 +492,8 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
               cause,
             }),
         ),
+        // One complete NDJSON frame per Writable.write. Interrupting a drain wait
+        // leaves the accepted buffer in Node's ordered queue (stdin has endOnDone: false).
         Effect.flatMap((encoded) =>
           Stream.run(Stream.encodeText(Stream.make(encoded)), handle.stdin),
         ),
@@ -945,24 +972,8 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
       );
     const deferred = yield* Deferred.make<A, NativeTelemetryClientError>();
     yield* Ref.update(pending, (requests) => new Map(requests).set(requestId, deferred));
-    return yield* writeCommand(Option.getOrThrow(current.handle), makeCommand(requestId)).pipe(
-      Effect.andThen(
-        Deferred.await(deferred).pipe(
-          Effect.timeoutOption(timeout),
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                Effect.fail(
-                  new NativeTelemetryRequestTimedOut({
-                    operation,
-                    timeoutMs: Duration.toMillis(timeout),
-                  }),
-                ),
-              onSome: Effect.succeed,
-            }),
-          ),
-        ),
-      ),
+    const write = writeCommand(Option.getOrThrow(current.handle), makeCommand(requestId));
+    return yield* requestProcessTable(write, deferred, timeout, operation).pipe(
       Effect.ensuring(
         Ref.update(pending, (requests) => {
           const next = new Map(requests);
@@ -980,16 +991,20 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     (requestId) => ({ version: RESOURCE_MONITOR_PROTOCOL_VERSION, type: "sampleNow", requestId }),
   );
 
-  const processTable: NativeTelemetryClient["Service"]["processTable"] = request(
-    pendingProcessTables,
-    "processTable",
-    PROCESS_TABLE_REQUEST_TIMEOUT,
-    (requestId) => ({
+  const processTable = Effect.fnUntraced(function* (identities: boolean) {
+    const current = yield* Ref.get(state);
+    if (identities && !Option.getOrUndefined(current.hello)?.capabilities.processIdentities) {
+      return yield* new NativeTelemetryUnavailable({ reason: "process identities unavailable" });
+    }
+    // A busy monitor must leave time for the cleanup tracker's ps fallback.
+    const timeout = identities ? Duration.millis(250) : PROCESS_TABLE_REQUEST_TIMEOUT;
+    return yield* request(pendingProcessTables, "processTable", timeout, (requestId) => ({
       version: RESOURCE_MONITOR_PROTOCOL_VERSION,
       type: "processTable",
+      ...(identities ? { identities } : {}),
       requestId,
-    }),
-  );
+    }));
+  });
 
   const scanDisk: NativeTelemetryClient["Service"]["scanDisk"] = Effect.fn(
     "NativeTelemetryClient.scanDisk",
@@ -1024,7 +1039,8 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     setExternalProcesses,
     setHostPowerState,
     sampleNow,
-    processTable,
+    processTable: processTable(false),
+    processIdentities: processTable(true),
     scanDisk,
     retry: Ref.get(state).pipe(
       Effect.flatMap((current) =>
