@@ -13,6 +13,9 @@ use sysinfo::{
     MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
 };
 
+#[cfg(unix)]
+mod service_launcher;
+
 const PROTOCOL_VERSION: u32 = 3;
 const MIN_SAMPLE_INTERVAL_MS: u64 = 250;
 const MAX_SAMPLE_INTERVAL_MS: u64 = 60_000;
@@ -1179,6 +1182,16 @@ fn write_history(
 }
 
 fn main() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut args = std::env::args_os().skip(1);
+        if args
+            .next()
+            .is_some_and(|command| command == service_launcher::COMMAND)
+        {
+            service_launcher::run(args);
+        }
+    }
     let mut writer = BufWriter::new(io::stdout().lock());
     write_event(
         &mut writer,
