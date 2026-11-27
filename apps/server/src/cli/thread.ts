@@ -816,6 +816,26 @@ const launchWorkspaceStrategy = (input: {
       }),
   });
 
+/** `--provider`, `--model` and `--option`, read by {@link launchModelSelection}. */
+export const modelSelectionFlags = {
+  provider: Flag.String("provider").pipe(
+    Flag.withDescription("Provider instance id. Pass with --model."),
+    Flag.optional,
+  ),
+  model: Flag.String("model").pipe(
+    Flag.withDescription(
+      "Model slug. Omitted: the project's default model, or the stored one when updating a schedule.",
+    ),
+    Flag.optional,
+  ),
+  option: Flag.String("option").pipe(
+    Flag.withDescription(
+      "Model option as id=value (Codex: reasoningEffort=high; Claude: effort=high). Ids depend on the model. Repeat for more. Needs --provider and --model.",
+    ),
+    Flag.atLeast(0),
+  ),
+};
+
 /**
  * Options are model specific, so they need an explicit model. `true` and
  * `false` become booleans because boolean options such as fastMode only match
@@ -952,20 +972,7 @@ const threadStartCommand = Command.make("start", {
     ),
     Flag.withDefault(false),
   ),
-  provider: Flag.String("provider").pipe(
-    Flag.withDescription("Provider instance id. Pass with --model."),
-    Flag.optional,
-  ),
-  model: Flag.String("model").pipe(
-    Flag.withDescription("Model slug. Defaults to the project's default model."),
-    Flag.optional,
-  ),
-  option: Flag.String("option").pipe(
-    Flag.withDescription(
-      "Model option as id=value (Codex: reasoningEffort=high; Claude: effort=high). Ids depend on the model. Repeat for more. Needs --provider and --model.",
-    ),
-    Flag.atLeast(0),
-  ),
+  ...modelSelectionFlags,
   worktree: Flag.String("worktree").pipe(
     Flag.withDescription(
       "Run in a new git worktree based on this branch, tag, or commit, instead of the project folder.",

@@ -24,6 +24,8 @@ import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts
 import { readLiveServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import {
+  launchModelSelection,
+  modelSelectionFlags,
   resolveProject,
   ThreadProjectNotFoundError,
   ThreadServerNotRunningError,
@@ -346,6 +348,7 @@ const scheduleUpsertCommand = Command.make("upsert", {
     ),
     Flag.withDefault("auto"),
   ),
+  ...modelSelectionFlags,
   json: jsonFlag,
 }).pipe(
   Command.withDescription("Create a scheduled task, or update an existing one with --id."),
@@ -384,6 +387,7 @@ const scheduleUpsertCommand = Command.make("upsert", {
               Effect.mapError(() => new ThreadUsageError({ detail: "--title cannot be empty." })),
             )
           : undefined;
+        const modelSelection = yield* launchModelSelection(flags);
         const project = yield* resolveProject(tools, flags.project);
         if (scheduledTaskId !== undefined) {
           const existing = yield* tools.call(
@@ -413,6 +417,17 @@ const scheduleUpsertCommand = Command.make("upsert", {
             ...(title === undefined ? {} : { title }),
             ...(enabled === undefined ? {} : { enabled }),
             ...(freshSession === undefined ? {} : { freshSession }),
+            ...(modelSelection === undefined
+              ? {}
+              : {
+                  target: {
+                    providerInstanceId: modelSelection.instanceId,
+                    model: modelSelection.model,
+                    ...(modelSelection.options === undefined
+                      ? {}
+                      : { options: modelSelection.options }),
+                  },
+                }),
           },
           OrchestratorMcpScheduleTaskResult,
         );
