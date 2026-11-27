@@ -1929,7 +1929,7 @@ const make = Effect.gen(function* () {
   const assertTabCapacity = (agentSessionId: string) => {
     if (atTabLimit(agentSessionId))
       throw new BrowserControlInterrupted({
-        message: `Too many server browser tabs are open (${AGENT_TAB_LIMIT} per agent session, ${SERVER_TAB_LIMIT} per server). Close one with t3_preview_close or reuse one from preview_status tabs.`,
+        message: `Too many server browser tabs are open (${AGENT_TAB_LIMIT} per thread, ${SERVER_TAB_LIMIT} per server). Close one with t3_preview_close or reuse one from preview_status tabs.`,
         reason: "tabLimit",
       });
   };
@@ -2641,7 +2641,7 @@ const make = Effect.gen(function* () {
     if (!request.tabIdExplicit && owned.length > 1)
       throw new BrowserControlInterrupted({
         message:
-          "Multiple tabs belong to this agent session. Pass a tabId from preview_open or preview_status tabs.",
+          "Multiple tabs belong to this thread. Pass a tabId from preview_open or preview_status tabs.",
         reason: "tabRequired",
       });
     const tab =
@@ -2659,7 +2659,7 @@ const make = Effect.gen(function* () {
     if (!READ_OPERATIONS.has(request.operation) && !tab.control.agentMayAct(request.agentSessionId))
       throw new BrowserControlInterrupted({
         message:
-          "This tab belongs to another agent session. You can read it, but open your own tab to act.",
+          "This tab belongs to another thread. You can read it, but open your own tab to act.",
         reason: "agentMismatch",
       });
     return tab;
@@ -2835,7 +2835,7 @@ const make = Effect.gen(function* () {
         )
           throw new BrowserControlInterrupted({
             message:
-              "Multiple tabs belong to this agent session. Pass a tabId from preview_open or preview_status tabs.",
+              "Multiple tabs belong to this thread. Pass a tabId from preview_open or preview_status tabs.",
             reason: "tabRequired",
           });
         const recordings = [...tabs.values()].filter(
