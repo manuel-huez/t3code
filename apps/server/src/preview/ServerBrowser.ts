@@ -457,6 +457,8 @@ interface ServerTab {
   copyKeyedUntil: number;
   readonly createdAt: number;
   usedAt: number;
+  /** A human took control at least once, so the tab may wait for them to come back. */
+  humanControlled: boolean;
   readonly viewers: Set<ViewerState>;
   viewerAttached: PromiseWithResolvers<void> | null;
   readonly consoleEntries: Array<PreviewAutomationConsoleEntry>;
@@ -543,6 +545,8 @@ const READ_OPERATIONS: ReadonlySet<PreviewAutomationRequest["operation"]> = new 
 const AGENT_TAB_LIMIT = 8;
 const SERVER_TAB_LIMIT = 32;
 const AGENT_TAB_IDLE_MS = 30 * 60 * 1000;
+/** A human may take a handed-over tab (a sign-in, a payment) much longer to finish. */
+const HUMAN_CONTROLLED_TAB_IDLE_MS = 24 * 60 * 60 * 1000;
 const IDLE_SWEEP_INTERVAL = "1 minute";
 
 const DOWNLOAD_LIMIT = 20;
@@ -1258,9 +1262,12 @@ const make = Effect.gen(function* () {
     if (!desktop) await recordCopies(cdp);
     page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
-    const control = new SessionControl(snapshot.automationOwner ?? null, () =>
-      ServerBrowserPage.invalidateRefs(page),
-    );
+    const control = new SessionControl(snapshot.automationOwner ?? null, () => {
+      ServerBrowserPage.invalidateRefs(page);
+      // Taking or giving back control is use of the tab.
+      tab.usedAt = Date.now();
+      if (control.controller !== null) tab.humanControlled = true;
+    });
     let pendingFileChooserOffer = Promise.resolve();
     const tab: ServerTab = {
       threadId: ThreadId.make(snapshot.threadId),
@@ -1272,6 +1279,7 @@ const make = Effect.gen(function* () {
       copyKeyedUntil: 0,
       createdAt: Date.now(),
       usedAt: Date.now(),
+      humanControlled: false,
       viewers: new Set(),
       viewerAttached: null,
       consoleEntries: [],
@@ -1932,13 +1940,13 @@ const make = Effect.gen(function* () {
 
   const reclaimingTabs = new Set<ServerTab>();
   const idleAgentTabs = () => {
-    const cutoff = Date.now() - AGENT_TAB_IDLE_MS;
+    const now = Date.now();
     return [...tabs.values()].filter(
       (tab) =>
         tab.control.agentId !== null &&
         !reclaimingTabs.has(tab) &&
         !isVisible(tab) &&
-        tab.usedAt < cutoff,
+        tab.usedAt < now - (tab.humanControlled ? HUMAN_CONTROLLED_TAB_IDLE_MS : AGENT_TAB_IDLE_MS),
     );
   };
 

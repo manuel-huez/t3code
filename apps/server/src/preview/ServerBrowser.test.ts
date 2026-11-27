@@ -4330,6 +4330,43 @@ it.effect("failed session and browser launches release capacity, as does closing
   ).pipe(Effect.provide(layer)),
 );
 
+it.effect("a hidden agent tab a human took over waits a day for them, not half an hour", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const now = vi.spyOn(Date, "now").mockReturnValue(0);
+      yield* Effect.addFinalizer(() => Effect.sync(() => now.mockRestore()));
+      const { browser, broker, tabId: handedOver } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const open = (target: typeof scope) =>
+        broker.invoke<PreviewAutomationStatus>({
+          scope: target,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+      // A second hidden agent tab that no human touched.
+      yield* open(scope);
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const viewer = yield* browser.attachViewer(viewerInput(handedOver, true));
+          yield* viewer.input({ type: "takeControl" });
+        }),
+      );
+      const openTabs = Effect.map(manager.list({ threadId: scope.thread.threadId }), (list) =>
+        list.sessions.map((session) => session.tabId),
+      );
+
+      // Opening a tab elsewhere sweeps idle agent tabs.
+      now.mockReturnValue(31 * 60 * 1000);
+      yield* open(asAgent("sweep-trigger-1"));
+      expect(yield* openTabs).toEqual([handedOver]);
+
+      now.mockReturnValue(24 * 60 * 60 * 1000 + 1);
+      yield* open(asAgent("sweep-trigger-2"));
+      expect(yield* openTabs).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.effect("a full server takes back the slot of the longest idle agent tab nobody views", () =>
   Effect.scoped(
     Effect.gen(function* () {
