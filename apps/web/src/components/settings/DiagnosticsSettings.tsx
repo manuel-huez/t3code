@@ -6,12 +6,10 @@ import { environmentSession } from "../../state/session";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { AuthEnvironmentMaintainScope } from "@t3tools/contracts";
-import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
   AlertTriangleIcon,
   CopyIcon,
   FolderOpenIcon,
-  InfoIcon,
   ChevronDownIcon,
   ChevronRightIcon,
 } from "lucide-react";
@@ -19,8 +17,8 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useRef, useState, type ReactNode } from "react";
-import { msg, T, useGT, useMessages, Var } from "gt-react";
+import { useRef, useState } from "react";
+import { msg, T, useGT, useMessages } from "gt-react";
 import type { MessageResolver } from "../../i18n/messages";
 import type {
   ServerProcessDiagnosticsEntry,
@@ -48,6 +46,14 @@ import {
   formatShortProcessName,
 } from "./DiagnosticsSettings.logic";
 import { ExpandableText } from "./ExpandableText";
+import {
+  DiagnosticsLastChecked,
+  DiagnosticsRefreshButton,
+  DiagnosticsTable,
+  EmptyRows,
+  StatBlock,
+  StatsGrid,
+} from "./diagnosticsLayout";
 import { ResourceTelemetryDiagnostics } from "./ResourceTelemetryDiagnostics";
 import { formatCpuTime } from "./ResourceTelemetryDiagnostics.logic";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
@@ -75,127 +81,6 @@ function shortenTraceId(traceId: string): string {
 
 function isStaleProcessSignalMessage(message: string | undefined): boolean {
   return message?.includes("not a live descendant") ?? false;
-}
-
-function StatBlock({
-  label,
-  value,
-  tooltip,
-  tone = "default",
-}: {
-  label: string;
-  value: string;
-  tooltip?: ReactNode;
-  tone?: "default" | "warning" | "danger";
-}) {
-  return (
-    <div className="min-w-0 border-border/60 px-4 py-3 sm:px-5">
-      <div className="flex min-w-0 items-center gap-1.5 text-2xs font-medium uppercase tracking-widest text-muted-foreground/70">
-        <span className="min-w-0 truncate">{label}</span>
-        {tooltip ? (
-          <SharedTooltipTrigger
-            render={
-              <button
-                type="button"
-                className="cursor-pointer inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground"
-                aria-label={`${label} details`}
-              >
-                <InfoIcon className="size-3" />
-              </button>
-            }
-            label={tooltip}
-          />
-        ) : null}
-      </div>
-      <div
-        className={cn(
-          "mt-1 truncate font-mono text-lg font-semibold tabular-nums text-foreground",
-          tone === "warning" && "text-warning-foreground",
-          tone === "danger" && "text-destructive",
-        )}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function StatsGrid({ children }: { children: ReactNode }) {
-  return (
-    <div className="relative grid grid-cols-2 sm:grid-cols-4">
-      <span
-        className="pointer-events-none absolute inset-y-0 left-1/2 w-px bg-border/60"
-        aria-hidden
-      />
-      <span
-        className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-border/60 sm:hidden"
-        aria-hidden
-      />
-      <span
-        className="pointer-events-none absolute inset-y-0 left-1/4 hidden w-px bg-border/60 sm:block"
-        aria-hidden
-      />
-      <span
-        className="pointer-events-none absolute inset-y-0 left-3/4 hidden w-px bg-border/60 sm:block"
-        aria-hidden
-      />
-      {children}
-    </div>
-  );
-}
-
-function EmptyRows({ label }: { label: string }) {
-  return <div className="px-4 py-4 text-xs text-muted-foreground sm:px-5">{label}</div>;
-}
-
-function DiagnosticsTable({
-  headers,
-  children,
-  minTableWidth = "min-w-[640px]",
-  columnWidths,
-}: {
-  headers: ReadonlyArray<string>;
-  children: ReactNode;
-  minTableWidth?: string;
-  columnWidths?: ReadonlyArray<string>;
-}) {
-  return (
-    <ScrollArea
-      radius="none"
-      chainVerticalScroll
-      scrollFade
-      hideScrollbars
-      className="w-full max-w-full"
-    >
-      <table
-        className={cn("w-full text-left text-xs", minTableWidth, columnWidths && "table-fixed")}
-      >
-        {columnWidths ? (
-          <colgroup>
-            {headers.map((header, index) => (
-              <col key={header} className={columnWidths[index]} />
-            ))}
-          </colgroup>
-        ) : null}
-        <thead className="border-b border-border/60 text-2xs uppercase tracking-widest text-muted-foreground/70">
-          <tr>
-            {headers.map((header, index) => (
-              <th
-                key={header}
-                className={cn(
-                  "whitespace-nowrap px-4 py-2.5 font-semibold first:sm:pl-5 last:sm:pr-5",
-                  !columnWidths && index === headers.length - 1 && "w-px",
-                )}
-              >
-                {header.replaceAll(" ", "\u00a0")}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border/60">{children}</tbody>
-      </table>
-    </ScrollArea>
-  );
 }
 
 function TraceIdCell({ traceId }: { traceId: string }) {
@@ -674,70 +559,6 @@ function ProcessResourceHistoryTable({
         </table>
       </ScrollArea>
     </div>
-  );
-}
-
-function DiagnosticsLastChecked({ checkedAt }: { checkedAt: DateTime.Utc | null }) {
-  const gt = useGT();
-  const relative = useRelativeTimeState(checkedAt ? DateTime.formatIso(checkedAt) : null);
-
-  if (relative.status === "missing") {
-    return (
-      <span className="text-2xs text-muted-foreground/50">
-        <T>Checking</T>
-      </span>
-    );
-  }
-
-  if (relative.status === "invalid") {
-    return (
-      <span className="text-2xs text-muted-foreground/50">
-        <T>Checked unavailable</T>
-      </span>
-    );
-  }
-
-  return (
-    <span className="text-2xs text-muted-foreground/60">
-      {relative.suffix ? (
-        <T context="the time is an elapsed time such as 5m">
-          Checked{" "}
-          <span className="font-mono tabular-nums">
-            <Var>{relative.value}</Var>
-          </span>{" "}
-          ago
-        </T>
-      ) : (
-        gt("Checked {time}", { time: relative.value })
-      )}
-    </span>
-  );
-}
-
-function DiagnosticsRefreshButton({
-  isPending,
-  label,
-  onClick,
-}: {
-  isPending: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <SharedTooltipTrigger
-      render={
-        <Button
-          size="icon-xs"
-          variant="ghost-muted"
-          disabled={isPending}
-          onClick={onClick}
-          aria-label={label}
-        >
-          <RefreshIcon refreshing={isPending} />
-        </Button>
-      }
-      label={label}
-    />
   );
 }
 

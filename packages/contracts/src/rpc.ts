@@ -402,6 +402,8 @@ import {
   ServerUpsertKeybindingResult,
 } from "./server.ts";
 import {
+  DiskUsageInput,
+  DiskUsageSnapshot,
   HostResourcesSnapshot,
   ResourceTelemetryHistory,
   ResourceTelemetryHistoryInput,
@@ -632,6 +634,7 @@ export const WS_METHODS = {
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
   serverGetHostResources: "server.getHostResources",
+  serverGetDiskUsage: "server.getDiskUsage",
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverGetResourceTelemetryHistory: "server.getResourceTelemetryHistory",
   serverRetryResourceTelemetry: "server.retryResourceTelemetry",
@@ -1149,6 +1152,12 @@ const WsServerGetProcessDiagnosticsRpc = Rpc.make(WS_METHODS.serverGetProcessDia
 const WsServerGetHostResourcesRpc = Rpc.make(WS_METHODS.serverGetHostResources, {
   payload: Schema.Struct({}),
   success: HostResourcesSnapshot,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsServerGetDiskUsageRpc = Rpc.make(WS_METHODS.serverGetDiskUsage, {
+  payload: DiskUsageInput,
+  success: DiskUsageSnapshot,
   error: EnvironmentAuthorizationError,
 });
 
@@ -2570,6 +2579,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
   WsServerGetHostResourcesRpc,
+  WsServerGetDiskUsageRpc,
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
