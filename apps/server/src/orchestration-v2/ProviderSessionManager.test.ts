@@ -856,6 +856,8 @@ function makeBrowserAccessProject(projectId: ProjectId): Project {
 function runBrowserAccessScenario(input: {
   readonly enableAgentBrowserAccess: boolean;
   readonly projectOverride: boolean;
+  readonly mainThreadsOnly?: boolean;
+  readonly serverMainThreadsOnly?: boolean;
   readonly deviceOverride?: boolean;
   readonly enableAgentDeviceAccess?: boolean;
   readonly enableDeviceSupport?: boolean;
@@ -913,6 +915,9 @@ function runBrowserAccessScenario(input: {
           projectServiceLayer: layerProjectService,
           serverSettingsLayer: ServerSettings.layerTest({
             enableAgentBrowserAccess: input.enableAgentBrowserAccess,
+            ...(input.serverMainThreadsOnly === undefined
+              ? {}
+              : { agentBrowserAccessMainThreadsOnly: input.serverMainThreadsOnly }),
             ...(input.enableAgentDeviceAccess === undefined
               ? {}
               : { enableAgentDeviceAccess: input.enableAgentDeviceAccess }),
@@ -922,6 +927,9 @@ function runBrowserAccessScenario(input: {
             projectSettingsOverrides: {
               [projectId]: {
                 enableAgentBrowserAccess: input.projectOverride,
+                ...(input.mainThreadsOnly === undefined
+                  ? {}
+                  : { agentBrowserAccessMainThreadsOnly: input.mainThreadsOnly }),
                 ...(input.deviceOverride === undefined
                   ? {}
                   : { enableAgentDeviceAccess: input.deviceOverride }),
@@ -6125,6 +6133,28 @@ it.effect("ProviderSessionManagerV2 withholds device tools while device support 
       missingProject?.capabilities?.has("device"),
       "agent device access granted device tools with device support off for a missing project",
     );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 keeps a project's browser for main threads when it asks", () =>
+  Effect.gen(function* () {
+    const parent = ThreadId.make("thread-provider-session-manager-parent");
+    const browser = (input: {
+      mainThreadsOnly?: boolean;
+      serverMainThreadsOnly?: boolean;
+      delegatedBy?: ThreadId;
+    }) =>
+      runBrowserAccessScenario({
+        enableAgentBrowserAccess: true,
+        projectOverride: true,
+        ...input,
+      }).pipe(Effect.map((config) => config?.capabilities?.has("preview")));
+    assert.isTrue(yield* browser({ delegatedBy: parent }));
+    assert.isTrue(yield* browser({ mainThreadsOnly: true }));
+    assert.isFalse(yield* browser({ mainThreadsOnly: true, delegatedBy: parent }));
+    // The server-wide value applies to projects that do not override it.
+    assert.isFalse(yield* browser({ serverMainThreadsOnly: true, delegatedBy: parent }));
+    assert.isTrue(yield* browser({ serverMainThreadsOnly: true }));
   }),
 );
 

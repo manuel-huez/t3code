@@ -509,20 +509,30 @@ export const layerWithOptions = (
           return yield* Effect.gen(function* () {
             const settings = yield* serverSettings.value.getSettings;
             const thread = yield* projectionStore.getThread(threadId);
+            const subagent = thread.lineage.relationshipToParent === "subagent";
             const entries = Object.values(settings.projectSettingsOverrides);
             const browserOverridden = entries.some(
               (entry) => entry.enableAgentBrowserAccess !== undefined,
             );
+            const mainThreadsOnlyOverridden = entries.some(
+              (entry) => entry.agentBrowserAccessMainThreadsOnly !== undefined,
+            );
             const deviceOverridden = entries.some(
               (entry) => entry.enableAgentDeviceAccess !== undefined,
             );
-            if (browserOverridden || deviceOverridden) {
+            if (browserOverridden || mainThreadsOnlyOverridden || deviceOverridden) {
               const project = Option.isSome(projectService)
                 ? yield* projectService.value.getById(thread.projectId)
                 : Option.none();
               if (Option.isNone(project))
                 return {
-                  browser: browserOverridden ? false : settings.enableAgentBrowserAccess,
+                  browser:
+                    !browserOverridden &&
+                    settings.enableAgentBrowserAccess &&
+                    !(
+                      subagent &&
+                      (mainThreadsOnlyOverridden || settings.agentBrowserAccessMainThreadsOnly)
+                    ),
                   device:
                     settings.enableDeviceSupport &&
                     !deviceOverridden &&
@@ -531,7 +541,9 @@ export const layerWithOptions = (
             }
             const effective = resolveProjectSettings(settings, thread.projectId).settings;
             return {
-              browser: effective.enableAgentBrowserAccess,
+              browser:
+                effective.enableAgentBrowserAccess &&
+                !(subagent && effective.agentBrowserAccessMainThreadsOnly),
               device: settings.enableDeviceSupport && effective.enableAgentDeviceAccess,
             };
           }).pipe(
