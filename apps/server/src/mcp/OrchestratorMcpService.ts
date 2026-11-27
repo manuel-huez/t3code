@@ -29,6 +29,7 @@ import {
   type OrchestratorMcpDeleteScheduledTaskResult,
   type OrchestratorMcpListScheduledTasksResult,
   type OrchestratorMcpScheduledTask,
+  type OrchestratorMcpScheduleTarget,
   type OrchestratorMcpScheduleTaskInput,
   type OrchestratorMcpScheduleTaskResult,
   type OrchestratorMcpTarget,
@@ -300,6 +301,13 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     boundThreadId: task.threadId,
     freshSession: scheduledTaskThreadMode(task) === "fresh_session",
     schedule: task.schedule,
+    target: {
+      providerInstanceId: task.modelSelection.instanceId,
+      model: task.modelSelection.model,
+      ...(task.modelSelection.options === undefined
+        ? {}
+        : { options: task.modelSelection.options }),
+    },
     nextRunAt: task.nextRunAt,
     lastRunStatus: task.lastRunStatus,
     ...(task.webhook?.url == null || !mayRun || task.blockedByPolicy !== undefined
@@ -1703,7 +1711,13 @@ const make = Effect.gen(function* () {
   };
 
   const resolveTarget = Effect.fn("OrchestratorMcpService.resolveTarget")(function* (input: {
-    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    /** The inherited model and the project whose provider settings apply. */
+    readonly parent: {
+      readonly thread: Pick<
+        OrchestrationV2ThreadProjection["thread"],
+        "projectId" | "modelSelection"
+      >;
+    };
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
     /** Receipt replays bypass current settings because they start no work. Dispatch must reuse the checked command ID. */
@@ -1847,6 +1861,45 @@ const make = Effect.gen(function* () {
       supportedRuntimeModes: provider.supportedRuntimeModes,
     };
   });
+
+  /** A scheduled task's model: `inherited` unless `target` names one, checked like a delegate target. */
+  const resolveScheduleModel = Effect.fn("OrchestratorMcpService.resolveScheduleModel")(
+    function* (input: {
+      readonly projectId: ProjectId;
+      readonly inherited: ModelSelection;
+      readonly target: OrchestratorMcpScheduleTarget | undefined;
+      readonly runtimeMode: RuntimeMode;
+    }): Effect.fn.Return<ModelSelection, OrchestratorMcpFailure> {
+      if (input.target === undefined) return input.inherited;
+      const project = yield* requireProject(input.projectId);
+      const { modelSelection, supportedRuntimeModes } = yield* resolveTargetRechecking({
+        parent: { thread: { projectId: input.projectId, modelSelection: input.inherited } },
+        target: input.target,
+        providers: yield* loadProviders,
+        cwd: project.workspaceRoot,
+      });
+      const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
+        projectId: input.projectId,
+        instanceId: modelSelection.instanceId,
+      });
+      if (!enabled) {
+        return yield* failure(
+          "provider_unavailable",
+          `Provider ${modelSelection.instanceId} is not enabled for this project.`,
+        );
+      }
+      if (
+        supportedRuntimeModes !== undefined &&
+        !supportedRuntimeModes.includes(input.runtimeMode)
+      ) {
+        return yield* failure(
+          "invalid_request",
+          `Provider ${modelSelection.instanceId} does not support the task's ${input.runtimeMode} mode.`,
+        );
+      }
+      return modelSelection;
+    },
+  );
 
   const requestKey = (clientRequestId: string | undefined): Effect.Effect<string> =>
     clientRequestId === undefined ? random.uuidV4() : Effect.succeed(clientRequestId);
@@ -2471,8 +2524,12 @@ const make = Effect.gen(function* () {
             : "bindToCurrentThread binds to this thread, which belongs to a different project.",
         );
       }
-      const modelSelection =
-        parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project));
+      const modelSelection = yield* resolveScheduleModel({
+        projectId,
+        inherited: parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project)),
+        target: input.target,
+        runtimeMode: limits.runtimeMode,
+      });
       // Never end on a lone high surrogate, which renders as a broken character.
       const derivedTitle = (input.prompt.split("\n")[0]?.trim() ?? "")
         .slice(0, 80)
@@ -2614,7 +2671,12 @@ const make = Effect.gen(function* () {
                   ? "new_thread"
                   : "continue",
           workspaceStrategy,
-          modelSelection: existing.modelSelection,
+          modelSelection: yield* resolveScheduleModel({
+            projectId: existing.projectId,
+            inherited: existing.modelSelection,
+            target: input.target,
+            runtimeMode: existing.runtimeMode,
+          }),
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,

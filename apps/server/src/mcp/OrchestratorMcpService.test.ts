@@ -4458,16 +4458,21 @@ describe("OrchestratorMcpService provider resolution", () => {
             NodeCrypto.layer,
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadShell: () => Effect.succeed(null),
+              isProviderInstanceEnabledForProject: () => Effect.succeed(true),
             }),
             ServerSettings.layerTest(
               defaults.environment === undefined
                 ? {}
                 : { defaultModelSelection: defaults.environment },
             ),
-            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
-            Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-              list: () => Effect.succeed([]),
-            }),
+            providerRegistryLayer([
+              providerSnapshot({
+                instanceId: codexInstanceId,
+                driver: ProviderDriverKind.make("codex"),
+                model: "gpt-6.1-terra",
+              }),
+            ]),
+            adapterRegistryLayer([codexInstanceId]),
             Layer.mock(ProjectService.ProjectService)({
               getById: () =>
                 Effect.succeedSome({
@@ -4536,6 +4541,42 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.deepEqual(
           (yield* Ref.get(inputs)).map((input) => input.modelSelection),
           [environmentDefault],
+        );
+      }),
+    );
+
+    it.effect("saves a requested model and keeps it when an update names none", () =>
+      Effect.gen(function* () {
+        const inputs = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            service(
+              masterRepository,
+              yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+              existing,
+              inputs,
+            ),
+          ),
+        );
+        const terra = { providerInstanceId: codexInstanceId, model: "gpt-6.1-terra" };
+        yield* mcp.scheduleTask(client, {
+          projectId,
+          prompt: "Check the build",
+          schedule,
+          target: terra,
+        });
+        yield* mcp.updateScheduledTask(client, {
+          scheduledTaskId: existing.id,
+          target: terra,
+        });
+        yield* mcp.updateScheduledTask(client, { scheduledTaskId: existing.id, title: "Renamed" });
+        assert.deepEqual(
+          (yield* Ref.get(inputs)).map((input) => input.modelSelection),
+          [
+            { instanceId: codexInstanceId, model: "gpt-6.1-terra" },
+            { instanceId: codexInstanceId, model: "gpt-6.1-terra" },
+            existing.modelSelection,
+          ],
         );
       }),
     );
