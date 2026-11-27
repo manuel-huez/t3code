@@ -111,6 +111,8 @@ interface EnvironmentQueryAtomOptions<Input, A, E, R> extends Omit<
     query: Atom.Atom<AsyncResult.AsyncResult<A, unknown>>,
   ) => Atom.Atom<unknown> | undefined;
   readonly isFinal?: (value: A) => boolean;
+  /** A failed request also ends polling, as for a request an older server never answers. */
+  readonly stopOnFailure?: boolean;
   /**
    * Runs where each server answer lands, before readers see it, so derived records (summaries,
    * snapshots, watches) come from the producer instead of from components watching the data.
@@ -906,7 +908,8 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
       })
       .pipe(Atom.setIdleTTL(idleTtlMs));
     const isFinal = (result: AsyncResult.AsyncResult<A, unknown>) =>
-      options.isFinal !== undefined && Option.exists(AsyncResult.value(result), options.isFinal);
+      (options.stopOnFailure === true && AsyncResult.isFailure(result)) ||
+      (options.isFinal !== undefined && Option.exists(AsyncResult.value(result), options.isFinal));
     const intervalQuery =
       options.refreshIntervalMs === undefined
         ? queryAtom
@@ -1038,6 +1041,7 @@ export function createEnvironmentRpcQueryAtomFamily<
       readonly input: EnvironmentRpcInput<TTag>;
     }) => Atom.Atom<unknown> | undefined;
     readonly isFinal?: (value: EnvironmentRpcSuccess<TTag>) => boolean;
+    readonly stopOnFailure?: boolean;
     readonly onAnswer?: QueryAnswerHandler<EnvironmentRpcInput<TTag>, EnvironmentRpcSuccess<TTag>>;
   },
 ) {
@@ -1051,6 +1055,7 @@ export function createEnvironmentRpcQueryAtomFamily<
       : { refreshIntervalMs: options.refreshIntervalMs }),
     ...(options.refreshTrigger === undefined ? {} : { refreshTrigger: options.refreshTrigger }),
     ...(options.isFinal === undefined ? {} : { isFinal: options.isFinal }),
+    ...(options.stopOnFailure === undefined ? {} : { stopOnFailure: options.stopOnFailure }),
     ...(options.onAnswer === undefined ? {} : { onAnswer: options.onAnswer }),
     execute: (
       input: EnvironmentRpcInput<TTag>,
