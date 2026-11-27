@@ -157,6 +157,8 @@ interface CloudCliStatus {
   readonly linkMode: CliState.CliDesiredLinkMode;
   /** `null` when no server answered the live check, or none ran because no tunnel is wanted. */
   readonly reachability: EnvironmentConnectReachability | null;
+  /** Where other devices reach this machine, such as `t3 environment link` there. `null` until the tunnel connects. */
+  readonly address: string | null;
 }
 
 function formatRelayClientStatus(executable: RelayClient.RelayClientStatus): ReadonlyArray<string> {
@@ -221,6 +223,7 @@ function formatCloudStatus(
     `  Authorization: ${status.authenticated ? "stored credential" : "missing"}`,
     `  Environment link: ${provisioned}`,
     `  Relay: ${status.relayUrl ?? "not provisioned"}`,
+    ...(status.address ? [`  Address: ${status.address}`] : []),
     `  Publish agent activity: ${status.publishAgentActivity ? "enabled" : "disabled"}`,
     ...formatRelayClientStatus(status.relayClient),
     ...(!status.desired
@@ -333,18 +336,30 @@ const CLOUD_CLI_REACHABILITY_TIMEOUT = Duration.seconds(30);
 const CLOUD_CLI_REACHABILITY_WAIT = Duration.seconds(60);
 const CLOUD_CLI_REACHABILITY_RETRY = Duration.seconds(5);
 
-/** Asks the running server to check T3 Connect now. `null` when no server answers. */
-const checkLiveReachability = Effect.fn("cloud.cli.check_live_reachability")(function* () {
+/** Asks the running server, with relay read access. `null` when no server answers. */
+const askLiveServer = Effect.fn("cloud.cli.ask_live_server")(function* <A, E, R>(
+  request: (client: RunningServer.ServerClient) => Effect.Effect<A, E, R>,
+) {
   const config = yield* ServerConfig.ServerConfig;
   const runtimeState = yield* readLiveServerRuntimeState(config.serverRuntimeStatePath);
   if (Option.isNone(runtimeState)) return null;
   return yield* RunningServer.serverClient(runtimeState.value.origin, [AuthRelayReadScope]).pipe(
-    Effect.flatMap((client) => client.connect.checkReachability({ headers: {} })),
+    Effect.flatMap(request),
     Effect.timeout(CLOUD_CLI_REACHABILITY_TIMEOUT),
     Effect.scoped,
     Effect.orElseSucceed(() => null),
   );
 });
+
+/** Asks the running server to check T3 Connect now. `null` when no server answers. */
+const checkLiveReachability = () =>
+  askLiveServer((client) => client.connect.checkReachability({ headers: {} }));
+
+/** The running server's public T3 Connect address. `null` when it has none or does not answer. */
+const readLiveAddress = () =>
+  askLiveServer((client) => client.connect.linkState({ headers: {} })).pipe(
+    Effect.map((state) => (state?.tunnelHostname ? `https://${state.tunnelHostname}` : null)),
+  );
 
 function formatAlertBox(text: string): string {
   const lines = text.split("\n");
@@ -711,8 +726,12 @@ const connectStatusCommand = Command.make("status", {
         // Such a link authorizes the environment with its relay credential, not a CLI sign-in.
         const authenticated = cliAuthenticated || Option.isSome(relayCredential);
         // A publish-only link has no tunnel for other devices to reach.
-        const reachability =
-          desired && linkMode === "managed" ? yield* checkLiveReachability() : null;
+        const [reachability, address] =
+          desired && linkMode === "managed"
+            ? yield* Effect.all([checkLiveReachability(), readLiveAddress()], {
+                concurrency: 2,
+              })
+            : [null, null];
         const status: CloudCliStatus = {
           desired,
           authenticated,
@@ -726,6 +745,7 @@ const connectStatusCommand = Command.make("status", {
           relayClient: executable,
           linkMode,
           reachability,
+          address,
         };
         const commands = {
           link: yield* resolveHostCliHint("connect link", flags.baseDir),

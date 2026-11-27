@@ -121,7 +121,20 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
             const listening = NodeHttp.createServer((request, response) => {
               requests.push(`${request.method} ${request.url}`);
               response.writeHead(200, { "content-type": "application/json" });
-              response.end(JSON.stringify({ ok: true, endpointRuntimeStatus: null }));
+              response.end(
+                JSON.stringify(
+                  request.url === "/api/connect/link-state"
+                    ? {
+                        linked: true,
+                        cloudUserId: null,
+                        relayUrl: null,
+                        relayIssuer: null,
+                        publishAgentActivity: false,
+                        tunnelHostname: "prod-example.t3coderelay.com",
+                      }
+                    : { ok: true, endpointRuntimeStatus: null },
+                ),
+              );
             });
             listening.listen(0, "127.0.0.1", () => resume(Effect.succeed(listening)));
           }),
@@ -233,11 +246,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
       }),
     );
 
-    it.effect("status asks a running server to check reachability", () =>
+    it.effect("status asks a running server to check reachability and prints its address", () =>
       Effect.gen(function* () {
-        const { requests } = yield* runConnect(process.pid, { command: "status" });
+        const { requests, printed } = yield* runConnect(process.pid, { command: "status" });
 
-        assert.deepEqual(requests, ["POST /api/connect/reachability"]);
+        assert.deepEqual(requests.toSorted(), [
+          "GET /api/connect/link-state",
+          "POST /api/connect/reachability",
+        ]);
+        assert.include(printed, "Address: https://prod-example.t3coderelay.com");
       }),
     );
 
@@ -248,7 +265,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
           linkedByApp: true,
         });
 
-        assert.deepEqual(requests, ["POST /api/connect/reachability"]);
+        assert.deepEqual(requests.toSorted(), [
+          "GET /api/connect/link-state",
+          "POST /api/connect/reachability",
+        ]);
         assert.notInclude(printed, "Exposure: disabled");
         assert.notInclude(printed, "Authorization: missing");
         assert.notInclude(printed, "Next:");
