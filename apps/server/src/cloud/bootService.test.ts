@@ -184,6 +184,24 @@ it.each([
 const macInstallerPath =
   "/opt/homebrew/bin:/Users/theo/.npm-global/bin:/Users/theo/.nvm/versions/node/v22.16.0/bin:/usr/bin:/bin";
 
+/** A runtime as an archive installs it; on macOS the launch agent copies its resource monitor. */
+const writeFakeRuntime = Effect.fn("test.write_fake_runtime")(function* (
+  paths: ReturnType<typeof pinnedRuntimePaths>,
+  version: string,
+  platform: NodeJS.Platform,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.makeDirectory(path.dirname(paths.entryPath), { recursive: true });
+  yield* fs.writeFileString(paths.entryPath, "#!/bin/sh\n");
+  yield* fs.writeFileString(paths.sentinelPath, `${version}\n`);
+  if (platform === "darwin") {
+    const monitor = path.join(paths.versionDir, "resource-monitor", "darwin-arm64");
+    yield* fs.makeDirectory(monitor, { recursive: true });
+    yield* fs.writeFileString(path.join(monitor, "t3-resource-monitor"), `monitor ${version}\n`);
+  }
+});
+
 const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   platform: NodeJS.Platform = "linux",
   installerPath = macInstallerPath,
@@ -204,9 +222,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   const baseDir = path.join(home, ".t3");
   const statePath = path.join(baseDir, "runtime", "service-state.json");
   const runtime = pinnedRuntimePaths(path, baseDir, "1.2.3", platform);
-  yield* fs.makeDirectory(path.dirname(runtime.entryPath), { recursive: true });
-  yield* fs.writeFileString(runtime.entryPath, "#!/bin/sh\n");
-  yield* fs.writeFileString(runtime.sentinelPath, "1.2.3\n");
+  yield* writeFakeRuntime(runtime, "1.2.3", platform);
 
   const markersAtStop: boolean[] = [];
   const markersAtPreparation: boolean[] = [];
@@ -388,9 +404,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   ) =>
     Effect.gen(function* () {
       const paths = pinnedRuntimePaths(path, serviceBaseDir, cliVersion, platform);
-      yield* fs.makeDirectory(path.dirname(paths.entryPath), { recursive: true });
-      yield* fs.writeFileString(paths.entryPath, "#!/bin/sh\n");
-      yield* fs.writeFileString(paths.sentinelPath, `${cliVersion}\n`);
+      yield* writeFakeRuntime(paths, cliVersion, platform);
       return yield* BootService.make({
         baseDir: serviceBaseDir,
         logsDir: path.join(serviceBaseDir, "userdata", "logs"),
@@ -402,6 +416,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       Effect.provide(
         Layer.mergeAll(
           Layer.succeed(HostProcess.Platform, platform),
+          Layer.succeed(HostProcess.Architecture, "arm64"),
           Layer.succeed(HostProcess.UserId, underSudo ? 0 : 501),
           Layer.succeed(HostProcess.ExecutablePath, hostExecPath),
           Layer.succeed(
@@ -1561,9 +1576,16 @@ process.disconnect();
         protocol: SERVICE_LAUNCHER_PROTOCOL,
         activeVersion: "1.2.3",
       });
-      expect(yield* fs.readFileString(plan.unitPath)).toContain(
-        `    <string>${runtime.entryPath}</string>\n    <string>__service-launcher</string>`,
+      // launchd starts the runtime through the resource monitor, copied to a fixed path.
+      const launcher = path.join(plan.baseDir, "runtime", "t3-service");
+      const unit = yield* fs.readFileString(plan.unitPath);
+      expect(unit).toContain(
+        `    <string>${launcher}</string>\n    <string>service-launch</string>\n` +
+          `    <string>${runtime.entryPath}</string>\n    <string>__service-launcher</string>`,
       );
+      expect(BootService.bootServiceProgramOf(unit)).toBe(runtime.entryPath);
+      expect(yield* fs.readFileString(launcher)).toBe("monitor 1.2.3\n");
+      expect(((yield* fs.stat(launcher)).mode & 0o777).toString(8)).toBe("755");
       expect(yield* service.status).toMatchObject({
         current: true,
         installedVersion: "1.2.3",
