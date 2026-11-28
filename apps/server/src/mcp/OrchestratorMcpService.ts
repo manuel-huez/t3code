@@ -30,6 +30,7 @@ import {
   type OrchestratorMcpListScheduledTasksResult,
   type OrchestratorMcpScheduledTask,
   type OrchestratorMcpScheduleTarget,
+  type OrchestratorMcpScheduleWorkspace,
   type OrchestratorMcpScheduleTaskInput,
   type OrchestratorMcpScheduleTaskResult,
   type OrchestratorMcpTarget,
@@ -2404,8 +2405,12 @@ const make = Effect.gen(function* () {
 
   const scheduledTaskWorkspaceStrategy = Effect.fn(
     "OrchestratorMcpService.scheduledTaskWorkspaceStrategy",
-  )(function* (boundToThread: boolean, projectId: ProjectId) {
-    if (boundToThread) return { type: "root" as const };
+  )(function* (
+    boundToThread: boolean,
+    projectId: ProjectId,
+    workspace: OrchestratorMcpScheduleWorkspace | undefined,
+  ) {
+    if (boundToThread || workspace === "root") return { type: "root" as const };
     const { workspaceRoot } = yield* requireProject(projectId);
     return {
       type: "worktree" as const,
@@ -2557,7 +2562,11 @@ const make = Effect.gen(function* () {
           : bindToCurrentThread
             ? "continue"
             : "new_thread",
-        workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(bindToCurrentThread, projectId),
+        workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(
+          bindToCurrentThread,
+          projectId,
+          input.workspace,
+        ),
         modelSelection,
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
@@ -2644,11 +2653,15 @@ const make = Effect.gen(function* () {
             : input.bindToCurrentThread && parent !== undefined
               ? parent.thread.id
               : null;
-        // Reset the workspace only when the binding flips, so unbinding cannot leave runs in the shared checkout.
+        // Unless asked, reset the workspace only when the binding flips, so unbinding cannot leave runs in the shared checkout.
         const workspaceStrategy =
-          (threadId === null) === (existing.threadId === null)
+          input.workspace === undefined && (threadId === null) === (existing.threadId === null)
             ? existing.workspaceStrategy
-            : yield* scheduledTaskWorkspaceStrategy(threadId !== null, existing.projectId);
+            : yield* scheduledTaskWorkspaceStrategy(
+                threadId !== null,
+                existing.projectId,
+                input.workspace,
+              );
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           requireExisting: true,

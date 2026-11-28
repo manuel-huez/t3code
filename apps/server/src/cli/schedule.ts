@@ -348,6 +348,12 @@ const scheduleUpsertCommand = Command.make("upsert", {
     ),
     Flag.withDefault("auto"),
   ),
+  workspace: Flag.Literals("workspace", ["worktree", "root"]).pipe(
+    Flag.withDescription(
+      "Unbound runs: worktree (default) off the default branch, or root (project folder).",
+    ),
+    Flag.optional,
+  ),
   ...modelSelectionFlags,
   json: jsonFlag,
 }).pipe(
@@ -417,6 +423,7 @@ const scheduleUpsertCommand = Command.make("upsert", {
             ...(title === undefined ? {} : { title }),
             ...(enabled === undefined ? {} : { enabled }),
             ...(freshSession === undefined ? {} : { freshSession }),
+            ...(Option.isSome(flags.workspace) ? { workspace: flags.workspace.value } : {}),
             ...(modelSelection === undefined
               ? {}
               : {

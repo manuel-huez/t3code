@@ -4694,6 +4694,35 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect("runs in the project folder when asked, on create and on update", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]);
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            service(masterRepository, saved, {
+              ...existing,
+              workspaceStrategy: {
+                type: "worktree",
+                baseRef: "origin/master",
+                startFromOrigin: true,
+              },
+            }),
+          ),
+        );
+        yield* mcp.scheduleTask(client, {
+          projectId,
+          prompt: "Check the build",
+          schedule,
+          workspace: "root",
+        });
+        yield* mcp.updateScheduledTask(client, {
+          scheduledTaskId: existing.id,
+          workspace: "root",
+        });
+        assert.deepEqual(yield* Ref.get(saved), [{ type: "root" }, { type: "root" }]);
+      }),
+    );
+
     it.effect("keeps the saved workspace when an unbound task stays unbound", () =>
       Effect.gen(function* () {
         const saved = yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]);

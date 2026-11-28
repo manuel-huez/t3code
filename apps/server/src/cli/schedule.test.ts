@@ -139,6 +139,8 @@ it.effect("list, upsert, update preservation, ownership guard, and delete work o
       "--time",
       "03:00",
       "--fresh-session",
+      "--workspace",
+      "root",
       "--runtime-mode",
       "full-access",
       "--provider",
@@ -201,6 +203,7 @@ it.effect("list, upsert, update preservation, ownership guard, and delete work o
             title: "Nightly Dream",
             enabled: true,
             freshSession: true,
+            workspace: "root",
             target: {
               providerInstanceId: "codex",
               model: "gpt-6.1-terra",
