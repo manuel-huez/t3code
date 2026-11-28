@@ -48,6 +48,7 @@ const CONSTRAINED_SAMPLE_INTERVAL_MS = 15_000;
 const HANDSHAKE_TIMEOUT = Duration.seconds(5);
 const SAMPLE_REQUEST_TIMEOUT = Duration.seconds(5);
 const PROCESS_TABLE_REQUEST_TIMEOUT = Duration.seconds(5);
+const MEMORY_PRESSURE_REQUEST_TIMEOUT = Duration.seconds(1);
 const HISTORY_REQUEST_TIMEOUT = Duration.seconds(15);
 // A walk over a large worktree tree is measured in seconds, and on a slow disk in minutes.
 const DISK_SCAN_REQUEST_TIMEOUT = Duration.minutes(10);
@@ -82,7 +83,13 @@ export class NativeTelemetryHandshakeTimedOut extends Schema.TaggedError<NativeT
 class NativeTelemetryRequestTimedOut extends Schema.TaggedError<NativeTelemetryRequestTimedOut>()(
   "NativeTelemetryRequestTimedOut",
   {
-    operation: Schema.Literals(["processTable", "readHistory", "sampleNow", "scanDisk"]),
+    operation: Schema.Literals([
+      "memoryPressure",
+      "processTable",
+      "readHistory",
+      "sampleNow",
+      "scanDisk",
+    ]),
     timeoutMs: Schema.Number,
   },
 ) {
@@ -211,6 +218,8 @@ export class NativeTelemetryClient extends Context.Service<
       readonly root: string;
       readonly depth: number;
     }) => Effect.Effect<ResourceMonitorDiskScanEvent, NativeTelemetryClientError>;
+    /** macOS pressure level (1, 2 or 4), or null where the sidecar cannot read it. */
+    readonly memoryPressureLevel: Effect.Effect<number | null, NativeTelemetryClientError>;
     readonly retry: Effect.Effect<boolean>;
     readonly health: Effect.Effect<NativeTelemetryClientHealth>;
     readonly subscribeHealth: Effect.Effect<
@@ -441,6 +450,7 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
   const pendingSamples: PendingRequests<NativeTelemetrySnapshot> = yield* Ref.make(new Map());
   const pendingProcessTables: PendingRequests<ReadonlyArray<ResourceMonitorProcessTableEntry>> =
     yield* Ref.make(new Map());
+  const pendingPressureLevels: PendingRequests<number | null> = yield* Ref.make(new Map());
   const pendingHistories = yield* Ref.make(new Map<string, PendingHistoryRequest>());
   const pendingDiskScans: PendingRequests<ResourceMonitorDiskScanEvent> = yield* Ref.make(
     new Map(),
@@ -472,6 +482,7 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     yield* failAll(pendingSamples);
     yield* failAll(pendingProcessTables);
     yield* failAll(pendingDiskScans);
+    yield* failAll(pendingPressureLevels);
     const histories = yield* Ref.getAndSet(pendingHistories, new Map());
     yield* Effect.forEach(histories.values(), (request) => Deferred.fail(request.deferred, error), {
       discard: true,
@@ -547,6 +558,8 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
         return resolvePending(pendingProcessTables, event.requestId, event.processes);
       case "diskScan":
         return resolvePending(pendingDiskScans, event.requestId, event);
+      case "memoryPressure":
+        return resolvePending(pendingPressureLevels, event.requestId, event.level);
       case "historyChunk":
         return Effect.gen(function* () {
           const latestSnapshot = event.snapshots.at(-1);
@@ -1018,6 +1031,17 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     }));
   });
 
+  const memoryPressureLevel: NativeTelemetryClient["Service"]["memoryPressureLevel"] = request(
+    pendingPressureLevels,
+    "memoryPressure",
+    MEMORY_PRESSURE_REQUEST_TIMEOUT,
+    (requestId) => ({
+      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
+      type: "memoryPressure",
+      requestId,
+    }),
+  );
+
   const health = currentHealth;
 
   return NativeTelemetryClient.of({
@@ -1042,6 +1066,7 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     processTable: processTable(false),
     processIdentities: processTable(true),
     scanDisk,
+    memoryPressureLevel,
     retry: Ref.get(state).pipe(
       Effect.flatMap((current) =>
         !canRequestNativeTelemetryRetry(current.status, Option.isSome(current.handle))
@@ -1112,6 +1137,7 @@ export const layerTest = (
           }),
         );
       }),
+      memoryPressureLevel: Effect.succeed(null),
       retry: Effect.succeed(false),
       health,
       subscribeHealth:
