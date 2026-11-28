@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Predicate from "effect/Predicate";
 import * as Record from "effect/Record";
 import * as Schema from "effect/Schema";
 import {
@@ -20,6 +21,7 @@ import {
   type PreviewAutomationSnapshot,
   type PreviewAutomationSnapshotMetadata,
   type PreviewAutomationStatus,
+  type PreviewAutomationTypeActInput,
   type PreviewTabId,
 } from "@t3tools/contracts";
 
@@ -31,6 +33,8 @@ import {
 } from "../../../attachmentStore.ts";
 import { resolveAttachmentRelativePath } from "../../../attachmentPaths.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as SecretRequests from "../../../secrets/SecretRequests.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
@@ -116,6 +120,44 @@ const invokeTargeted = <A extends object>(
 const decodeActInput = Record.map(PreviewAutomationActInputs, (schema) =>
   Schema.decodeUnknownEffect(schema),
 );
+
+/** Not the page's error: whatever went wrong, the field may hold part of the secret. */
+const SECRET_TYPE_FAILED =
+  "Typing the secret failed; the field may hold part of it. Clear it (clear=true) and ask again with request_secret, since the secretRef is used up.";
+
+/**
+ * Types literal `text`, or the thread's one-use `secretRef`. With a ref, only
+ * the ref is in the tool call, and the value never comes back to the model.
+ */
+const typeText = Effect.fn("PreviewToolkit.typeText")(function* (
+  input: PreviewAutomationTypeActInput,
+) {
+  const { secretRef, text: _text, ...rest } = input;
+  if (secretRef === undefined) return yield* invokeTargeted<object>("type", input, input.timeoutMs);
+  const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+  const thread = yield* ThreadManagementService.ThreadManagementService.use((threads) =>
+    threads.getThreadShell(scope.thread.threadId),
+  ).pipe(
+    Effect.orElseSucceed(() => null),
+    Effect.filterOrFail(
+      Predicate.isNotNull,
+      () => new OrchestratorMcpFailure({ code: "thread_not_found", message: "Thread not found." }),
+    ),
+  );
+  const value = yield* SecretRequests.SecretRequests.use((secrets) =>
+    secrets.consume({ ref: secretRef, projectId: thread.projectId }),
+  ).pipe(
+    Effect.mapError(
+      (error) => new OrchestratorMcpFailure({ code: "invalid_request", message: error.message }),
+    ),
+  );
+  return yield* invokeTargeted<object>("type", { ...rest, text: value }, input.timeoutMs).pipe(
+    Effect.mapError(
+      () =>
+        new OrchestratorMcpFailure({ code: "orchestration_error", message: SECRET_TYPE_FAILED }),
+    ),
+  );
+});
 
 const UploadedRecordingArtifact = Schema.Struct({
   ...PreviewAutomationRecordingArtifact.fields,
@@ -239,11 +281,13 @@ const handlers = {
         (cause) => new OrchestratorMcpFailure({ code: "invalid_request", message: cause.message }),
       ),
       Effect.flatMap((decoded) =>
-        invokeTargeted<object>(
-          action,
-          decoded,
-          "timeoutMs" in decoded ? decoded.timeoutMs : undefined,
-        ),
+        action === "type"
+          ? typeText(decoded as PreviewAutomationTypeActInput)
+          : invokeTargeted<object>(
+              action,
+              decoded,
+              "timeoutMs" in decoded ? decoded.timeoutMs : undefined,
+            ),
       ),
     ),
   ),

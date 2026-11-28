@@ -465,12 +465,8 @@ const layerResourceCleanupTest = ResourceCleanupService.layer.pipe(
       DeviceService.makeWithHosts(new Map([[bootedSimulatorHost.id, bootedSimulatorHost]])),
     ),
   ),
-  Layer.provide(
-    Layer.mergeAll(
-      Layer.mock(PreviewManager.PreviewManager)({ close: () => Effect.void }),
-      Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void }),
-    ),
-  ),
+  Layer.provideMerge(PreviewManager.layer),
+  Layer.provide(Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void })),
 );
 
 const layerProjectDeletionTest = Layer.mergeAll(
@@ -695,6 +691,43 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
         assert.deepEqual(yield* devices.sessionsForThread(otherThreadId), otherSessions);
         assert.isTrue((yield* devices.state).devices[0]?.booted);
       }),
+  );
+
+  it.effect.each(["archive", "settle"] as const)("%s closes the thread's previews", (lifecycle) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const previews = yield* PreviewManager.PreviewManager;
+      const threadId = ThreadId.make(`preview-cleanup-thread:${lifecycle}`);
+      const otherThreadId = ThreadId.make(`preview-surviving-thread:${lifecycle}`);
+      for (const id of [threadId, otherThreadId]) {
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`preview-cleanup-create:${id}`),
+          createdBy: "user",
+          creationSource: "web",
+          threadId: id,
+          projectId: ProjectId.make("preview-cleanup-project"),
+          title: "Preview user",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        yield* previews.open({ threadId: id, runtime: "server" });
+      }
+
+      yield* orchestrator.dispatch({
+        type: lifecycle === "archive" ? "thread.archive" : "thread.settle",
+        commandId: CommandId.make(`preview-cleanup:${lifecycle}`),
+        threadId,
+      });
+      yield* worker.drain();
+
+      assert.deepEqual((yield* previews.list({ threadId })).sessions, []);
+      assert.lengthOf((yield* previews.list({ threadId: otherThreadId })).sessions, 1);
+    }),
   );
 
   it.effect.each(["no fork", "a live fork"] as const)(

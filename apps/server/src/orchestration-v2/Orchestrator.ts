@@ -5992,6 +5992,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         } satisfies PendingOrchestrationEffectV2,
       ]);
     }
+    // A finished thread's browser tabs would otherwise hold server browser slots.
+    if (command.type === "thread.archive" || command.type === "thread.settle") {
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:preview.cleanup`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: { type: "preview.cleanup" },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+    }
   });
 
   const dispatchProviderSessionDetach = Effect.fn("orchestrationV2.dispatch.providerSessionDetach")(
