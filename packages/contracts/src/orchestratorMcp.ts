@@ -723,11 +723,27 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
 
+/** The model a scheduled task runs on. Same fields and checks as a `delegate_task` target. */
+export const OrchestratorMcpScheduleTarget = Schema.Struct({
+  providerInstanceId: OrchestratorMcpTarget.fields.providerInstanceId,
+  model: OrchestratorMcpTarget.fields.model,
+  options: OrchestratorMcpTarget.fields.options,
+}).annotate({
+  description: "Model per run. Default: yours or the project's; updates keep it.",
+});
+export type OrchestratorMcpScheduleTarget = typeof OrchestratorMcpScheduleTarget.Type;
+
+export const OrchestratorMcpScheduleWorkspace = Schema.Literals(["worktree", "root"]).annotate({
+  description: "Unbound runs: worktree (default) off the default branch, or root (project folder).",
+});
+export type OrchestratorMcpScheduleWorkspace = typeof OrchestratorMcpScheduleWorkspace.Type;
+
 export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   projectId: OrchestratorMcpProjectTarget,
   prompt: OrchestratorMcpPrompt,
   schedule: OrchestratorMcpSchedule,
+  target: Schema.optional(OrchestratorMcpScheduleTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   enabled: Schema.optional(Schema.Boolean.annotate({ description: "Default true." })),
   bindToCurrentThread: Schema.optional(
@@ -742,6 +758,7 @@ export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
         "Runs share one thread but each starts a fresh session. Unbound: the first run makes the thread.",
     }),
   ),
+  workspace: Schema.optional(OrchestratorMcpScheduleWorkspace),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpScheduleTaskInput = typeof OrchestratorMcpScheduleTaskInput.Type;
@@ -765,6 +782,13 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   boundThreadId: Schema.NullOr(ThreadId),
   freshSession: Schema.Boolean,
   schedule: ScheduledTaskSchedule,
+  target: Schema.optional(
+    Schema.Struct({
+      providerInstanceId: ProviderInstanceId,
+      model: Schema.String,
+      options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+    }),
+  ),
   nextRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
   webhookUrl: Schema.optional(Schema.String).annotate({
@@ -808,6 +832,8 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
   enabled: Schema.optional(Schema.Boolean),
   bindToCurrentThread: Schema.optional(Schema.Boolean),
   freshSession: Schema.optional(Schema.Boolean),
+  target: Schema.optional(OrchestratorMcpScheduleTarget),
+  workspace: Schema.optional(OrchestratorMcpScheduleWorkspace),
 });
 export type OrchestratorMcpUpdateScheduledTaskInput =
   typeof OrchestratorMcpUpdateScheduledTaskInput.Type;
