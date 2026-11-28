@@ -2,6 +2,7 @@ import type {
   HostPowerSnapshot,
   ResourceMonitorCapabilities,
   ResourceMonitorCommand,
+  ResourceMonitorDiskScanEvent,
   ResourceMonitorEvent,
   ResourceMonitorExternalProcess,
   ResourceMonitorHelloEvent,
@@ -49,6 +50,8 @@ const SAMPLE_REQUEST_TIMEOUT = Duration.seconds(5);
 const PROCESS_TABLE_REQUEST_TIMEOUT = Duration.seconds(5);
 const MEMORY_PRESSURE_REQUEST_TIMEOUT = Duration.seconds(1);
 const HISTORY_REQUEST_TIMEOUT = Duration.seconds(15);
+// A walk over a large worktree tree is measured in seconds, and on a slow disk in minutes.
+const DISK_SCAN_REQUEST_TIMEOUT = Duration.minutes(10);
 const INITIAL_RESTART_DELAY = Duration.millis(500);
 const MAX_RESTART_DELAY = Duration.seconds(10);
 const FAILURE_WINDOW_MS = 60_000;
@@ -80,7 +83,13 @@ export class NativeTelemetryHandshakeTimedOut extends Schema.TaggedError<NativeT
 class NativeTelemetryRequestTimedOut extends Schema.TaggedError<NativeTelemetryRequestTimedOut>()(
   "NativeTelemetryRequestTimedOut",
   {
-    operation: Schema.Literals(["memoryPressure", "processTable", "readHistory", "sampleNow"]),
+    operation: Schema.Literals([
+      "memoryPressure",
+      "processTable",
+      "readHistory",
+      "sampleNow",
+      "scanDisk",
+    ]),
     timeoutMs: Schema.Number,
   },
 ) {
@@ -204,6 +213,11 @@ export class NativeTelemetryClient extends Context.Service<
       ReadonlyArray<ResourceMonitorProcessTableEntry>,
       NativeTelemetryClientError
     >;
+    /** Allocated bytes below `root`. The walk runs beside sampling and never delays it. */
+    readonly scanDisk: (input: {
+      readonly root: string;
+      readonly depth: number;
+    }) => Effect.Effect<ResourceMonitorDiskScanEvent, NativeTelemetryClientError>;
     /** macOS pressure level (1, 2 or 4), or null where the sidecar cannot read it. */
     readonly memoryPressureLevel: Effect.Effect<number | null, NativeTelemetryClientError>;
     readonly retry: Effect.Effect<boolean>;
@@ -233,6 +247,24 @@ export interface CollectionControl {
   readonly liveSubscriberCount: number;
   readonly sampleIntervalMs: number;
 }
+
+type PendingRequests<A> = Ref.Ref<Map<string, Deferred.Deferred<A, NativeTelemetryClientError>>>;
+
+const resolvePending = <A>(pending: PendingRequests<A>, requestId: string, value: A) =>
+  Ref.modify(pending, (requests) => {
+    const next = new Map(requests);
+    const deferred = next.get(requestId);
+    next.delete(requestId);
+    return [Option.fromUndefinedOr(deferred), next] as const;
+  }).pipe(
+    Effect.flatMap(
+      Option.match({
+        onNone: () => Effect.void,
+        onSome: (deferred) => Deferred.succeed(deferred, value),
+      }),
+    ),
+    Effect.asVoid,
+  );
 
 interface PendingHistoryRequest {
   readonly deferred: Deferred.Deferred<
@@ -372,6 +404,7 @@ export function requestProcessTable<A, E>(
   write: Effect.Effect<void, E>,
   response: Deferred.Deferred<A, E>,
   timeout: Duration.Duration,
+  operation: NativeTelemetryRequestTimedOut["operation"] = "processTable",
 ) {
   return write.pipe(
     Effect.andThen(Deferred.await(response)),
@@ -380,7 +413,7 @@ export function requestProcessTable<A, E>(
       orElse: () =>
         Effect.fail(
           new NativeTelemetryRequestTimedOut({
-            operation: "processTable",
+            operation,
             timeoutMs: Duration.toMillis(timeout),
           }),
         ),
@@ -414,19 +447,14 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
   });
   const appliedCollectionControl = yield* Ref.make(yield* Ref.get(collectionControl));
   const externalProcesses = yield* Ref.make<ReadonlyArray<ResourceMonitorExternalProcess>>([]);
-  const pendingSamples = yield* Ref.make(
-    new Map<string, Deferred.Deferred<NativeTelemetrySnapshot, NativeTelemetryClientError>>(),
-  );
-  const pendingProcessTables = yield* Ref.make(
-    new Map<
-      string,
-      Deferred.Deferred<ReadonlyArray<ResourceMonitorProcessTableEntry>, NativeTelemetryClientError>
-    >(),
-  );
-  const pendingPressureLevels = yield* Ref.make(
-    new Map<string, Deferred.Deferred<number | null, NativeTelemetryClientError>>(),
-  );
+  const pendingSamples: PendingRequests<NativeTelemetrySnapshot> = yield* Ref.make(new Map());
+  const pendingProcessTables: PendingRequests<ReadonlyArray<ResourceMonitorProcessTableEntry>> =
+    yield* Ref.make(new Map());
+  const pendingPressureLevels: PendingRequests<number | null> = yield* Ref.make(new Map());
   const pendingHistories = yield* Ref.make(new Map<string, PendingHistoryRequest>());
+  const pendingDiskScans: PendingRequests<ResourceMonitorDiskScanEvent> = yield* Ref.make(
+    new Map(),
+  );
   const snapshots = yield* PubSub.sliding<NativeTelemetrySnapshot>(8);
   const healthChanges = yield* PubSub.sliding<NativeTelemetryClientHealth>(4);
   const retryQueue = yield* Queue.sliding<void>(1);
@@ -443,19 +471,19 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
   const failPending = Effect.fn("NativeTelemetryClient.failPending")(function* (
     error: NativeTelemetryClientError,
   ) {
-    const samples = yield* Ref.getAndSet(pendingSamples, new Map());
-    const processTables = yield* Ref.getAndSet(pendingProcessTables, new Map());
-    const pressureLevels = yield* Ref.getAndSet(pendingPressureLevels, new Map());
+    const failAll = <A>(pending: PendingRequests<A>) =>
+      Ref.getAndSet(pending, new Map()).pipe(
+        Effect.flatMap((requests) =>
+          Effect.forEach(requests.values(), (deferred) => Deferred.fail(deferred, error), {
+            discard: true,
+          }),
+        ),
+      );
+    yield* failAll(pendingSamples);
+    yield* failAll(pendingProcessTables);
+    yield* failAll(pendingDiskScans);
+    yield* failAll(pendingPressureLevels);
     const histories = yield* Ref.getAndSet(pendingHistories, new Map());
-    yield* Effect.forEach(samples.values(), (deferred) => Deferred.fail(deferred, error), {
-      discard: true,
-    });
-    yield* Effect.forEach(processTables.values(), (deferred) => Deferred.fail(deferred, error), {
-      discard: true,
-    });
-    yield* Effect.forEach(pressureLevels.values(), (deferred) => Deferred.fail(deferred, error), {
-      discard: true,
-    });
     yield* Effect.forEach(histories.values(), (request) => Deferred.fail(request.deferred, error), {
       discard: true,
     });
@@ -523,47 +551,15 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
           if (healthChanged) yield* publishHealth;
           yield* PubSub.publish(snapshots, nativeSnapshot);
           if (event.requestId) {
-            const deferred = yield* Ref.modify(pendingSamples, (pending) => {
-              const next = new Map(pending);
-              const current = next.get(event.requestId!);
-              next.delete(event.requestId!);
-              return [Option.fromUndefinedOr(current), next];
-            });
-            if (Option.isSome(deferred)) {
-              yield* Deferred.succeed(deferred.value, nativeSnapshot);
-            }
+            yield* resolvePending(pendingSamples, event.requestId, nativeSnapshot);
           }
         });
       case "processTable":
-        return Ref.modify(pendingProcessTables, (pending) => {
-          const next = new Map(pending);
-          const deferred = next.get(event.requestId);
-          next.delete(event.requestId);
-          return [Option.fromUndefinedOr(deferred), next] as const;
-        }).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (deferred) => Deferred.succeed(deferred, event.processes),
-            }),
-          ),
-          Effect.asVoid,
-        );
+        return resolvePending(pendingProcessTables, event.requestId, event.processes);
+      case "diskScan":
+        return resolvePending(pendingDiskScans, event.requestId, event);
       case "memoryPressure":
-        return Ref.modify(pendingPressureLevels, (pending) => {
-          const next = new Map(pending);
-          const deferred = next.get(event.requestId);
-          next.delete(event.requestId);
-          return [Option.fromUndefinedOr(deferred), next] as const;
-        }).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (deferred) => Deferred.succeed(deferred, event.level),
-            }),
-          ),
-          Effect.asVoid,
-        );
+        return resolvePending(pendingPressureLevels, event.requestId, event.level);
       case "historyChunk":
         return Effect.gen(function* () {
           const latestSnapshot = event.snapshots.at(-1);
@@ -966,7 +962,13 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     );
   });
 
-  const sampleNow: NativeTelemetryClient["Service"]["sampleNow"] = Effect.gen(function* () {
+  // Untraced: each caller is the request's span boundary.
+  const request = Effect.fnUntraced(function* <A>(
+    pending: PendingRequests<A>,
+    operation: NativeTelemetryRequestTimedOut["operation"],
+    timeout: Duration.Duration,
+    makeCommand: (requestId: string) => ResourceMonitorCommand,
+  ) {
     const current = yield* Ref.get(state);
     if (!canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) {
       return yield* new NativeTelemetryUnavailable({
@@ -974,67 +976,6 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
       });
     }
 
-    const requestId = yield* random.uuidV4().pipe(
-      Effect.mapError(
-        (cause) =>
-          new NativeTelemetryCommandFailed({
-            operation: "createRequestId",
-            cause,
-          }),
-      ),
-    );
-    const deferred = yield* Deferred.make<NativeTelemetrySnapshot, NativeTelemetryClientError>();
-    yield* Ref.update(pendingSamples, (pending) => {
-      const next = new Map(pending);
-      next.set(requestId, deferred);
-      return next;
-    });
-    return yield* writeCommand(Option.getOrThrow(current.handle), {
-      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-      type: "sampleNow",
-      requestId,
-    }).pipe(
-      Effect.andThen(
-        Deferred.await(deferred).pipe(
-          Effect.timeoutOption(SAMPLE_REQUEST_TIMEOUT),
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                Effect.fail(
-                  new NativeTelemetryRequestTimedOut({
-                    operation: "sampleNow",
-                    timeoutMs: Duration.toMillis(SAMPLE_REQUEST_TIMEOUT),
-                  }),
-                ),
-              onSome: Effect.succeed,
-            }),
-          ),
-        ),
-      ),
-      Effect.ensuring(
-        Ref.update(pendingSamples, (pending) => {
-          const next = new Map(pending);
-          next.delete(requestId);
-          return next;
-        }),
-      ),
-    );
-  });
-
-  const processTable = Effect.fnUntraced(function* (identities: boolean) {
-    const current = yield* Ref.get(state);
-    if (!canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) {
-      return yield* new NativeTelemetryUnavailable({
-        reason: Option.getOrElse(current.lastError, () => "sidecar is not running"),
-      });
-    }
-
-    if (identities && !Option.getOrUndefined(current.hello)?.capabilities.processIdentities) {
-      return yield* new NativeTelemetryUnavailable({ reason: "process identities unavailable" });
-    }
-
-    // A busy monitor must leave time for the cleanup tracker's ps fallback.
-    const timeout = identities ? Duration.millis(250) : PROCESS_TABLE_REQUEST_TIMEOUT;
     const requestId = yield* random
       .uuidV4()
       .pipe(
@@ -1042,25 +983,13 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
           (cause) => new NativeTelemetryCommandFailed({ operation: "createRequestId", cause }),
         ),
       );
-    const deferred = yield* Deferred.make<
-      ReadonlyArray<ResourceMonitorProcessTableEntry>,
-      NativeTelemetryClientError
-    >();
-    yield* Ref.update(pendingProcessTables, (pending) => {
-      const next = new Map(pending);
-      next.set(requestId, deferred);
-      return next;
-    });
-    const write = writeCommand(Option.getOrThrow(current.handle), {
-      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-      type: "processTable",
-      ...(identities ? { identities } : {}),
-      requestId,
-    });
-    return yield* requestProcessTable(write, deferred, timeout).pipe(
+    const deferred = yield* Deferred.make<A, NativeTelemetryClientError>();
+    yield* Ref.update(pending, (requests) => new Map(requests).set(requestId, deferred));
+    const write = writeCommand(Option.getOrThrow(current.handle), makeCommand(requestId));
+    return yield* requestProcessTable(write, deferred, timeout, operation).pipe(
       Effect.ensuring(
-        Ref.update(pendingProcessTables, (pending) => {
-          const next = new Map(pending);
+        Ref.update(pending, (requests) => {
+          const next = new Map(requests);
           next.delete(requestId);
           return next;
         }),
@@ -1068,51 +997,49 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     );
   });
 
-  const memoryPressureLevel: NativeTelemetryClient["Service"]["memoryPressureLevel"] = Effect.gen(
-    function* () {
-      const current = yield* Ref.get(state);
-      if (!canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) {
-        return yield* new NativeTelemetryUnavailable({
-          reason: Option.getOrElse(current.lastError, () => "sidecar is not running"),
-        });
-      }
-      const requestId = yield* random
-        .uuidV4()
-        .pipe(
-          Effect.mapError(
-            (cause) => new NativeTelemetryCommandFailed({ operation: "createRequestId", cause }),
-          ),
-        );
-      const deferred = yield* Deferred.make<number | null, NativeTelemetryClientError>();
-      yield* Ref.update(pendingPressureLevels, (pending) =>
-        new Map(pending).set(requestId, deferred),
-      );
-      // The timeout covers the write too: another command can hold the pipe under backpressure.
-      return yield* writeCommand(Option.getOrThrow(current.handle), {
-        version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-        type: "memoryPressure",
-        requestId,
-      }).pipe(
-        Effect.andThen(Deferred.await(deferred)),
-        Effect.timeoutOrElse({
-          duration: MEMORY_PRESSURE_REQUEST_TIMEOUT,
-          orElse: () =>
-            Effect.fail(
-              new NativeTelemetryRequestTimedOut({
-                operation: "memoryPressure",
-                timeoutMs: Duration.toMillis(MEMORY_PRESSURE_REQUEST_TIMEOUT),
-              }),
-            ),
-        }),
-        Effect.ensuring(
-          Ref.update(pendingPressureLevels, (pending) => {
-            const next = new Map(pending);
-            next.delete(requestId);
-            return next;
-          }),
-        ),
-      );
-    },
+  const sampleNow: NativeTelemetryClient["Service"]["sampleNow"] = request(
+    pendingSamples,
+    "sampleNow",
+    SAMPLE_REQUEST_TIMEOUT,
+    (requestId) => ({ version: RESOURCE_MONITOR_PROTOCOL_VERSION, type: "sampleNow", requestId }),
+  );
+
+  const processTable = Effect.fnUntraced(function* (identities: boolean) {
+    const current = yield* Ref.get(state);
+    if (identities && !Option.getOrUndefined(current.hello)?.capabilities.processIdentities) {
+      return yield* new NativeTelemetryUnavailable({ reason: "process identities unavailable" });
+    }
+    // A busy monitor must leave time for the cleanup tracker's ps fallback.
+    const timeout = identities ? Duration.millis(250) : PROCESS_TABLE_REQUEST_TIMEOUT;
+    return yield* request(pendingProcessTables, "processTable", timeout, (requestId) => ({
+      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
+      type: "processTable",
+      ...(identities ? { identities } : {}),
+      requestId,
+    }));
+  });
+
+  const scanDisk: NativeTelemetryClient["Service"]["scanDisk"] = Effect.fn(
+    "NativeTelemetryClient.scanDisk",
+  )(function* ({ root, depth }) {
+    return yield* request(pendingDiskScans, "scanDisk", DISK_SCAN_REQUEST_TIMEOUT, (requestId) => ({
+      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
+      type: "scanDisk",
+      requestId,
+      root,
+      depth,
+    }));
+  });
+
+  const memoryPressureLevel: NativeTelemetryClient["Service"]["memoryPressureLevel"] = request(
+    pendingPressureLevels,
+    "memoryPressure",
+    MEMORY_PRESSURE_REQUEST_TIMEOUT,
+    (requestId) => ({
+      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
+      type: "memoryPressure",
+      requestId,
+    }),
   );
 
   const health = currentHealth;
@@ -1138,6 +1065,7 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     sampleNow,
     processTable: processTable(false),
     processIdentities: processTable(true),
+    scanDisk,
     memoryPressureLevel,
     retry: Ref.get(state).pipe(
       Effect.flatMap((current) =>
@@ -1202,6 +1130,13 @@ export const layerTest = (
           reason: "No resource monitor process table was configured for this test.",
         }),
       ),
+      scanDisk: Effect.fn("NativeTelemetryClient.scanDisk")(function () {
+        return Effect.fail(
+          new NativeTelemetryUnavailable({
+            reason: "No disk scan was configured for this test.",
+          }),
+        );
+      }),
       memoryPressureLevel: Effect.succeed(null),
       retry: Effect.succeed(false),
       health,

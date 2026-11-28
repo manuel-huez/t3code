@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import { cursorRateModel } from "./accountUsage.ts";
@@ -312,6 +313,11 @@ export const CursorDriver: ProviderDriver<
       displayName,
       accentColor,
       enabled,
+      dataDirectories: HostProcess.HomeDirectory.pipe(
+        Effect.map((home) => [
+          path.join(processEnv.HOME?.trim() || processEnv.USERPROFILE?.trim() || home, ".cursor"),
+        ]),
+      ),
       auth: auth.controller,
       snapshot,
       snapshotForCwd: (cwd) =>
